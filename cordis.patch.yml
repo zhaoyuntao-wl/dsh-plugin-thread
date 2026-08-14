@@ -1,0 +1,4 @@
+# thread dsh adapter bundle layer — applied when a profile lists this bundle.
+- insert:
+    - id: dsh-thread
+      name: '@thread/adapter-dsh'
