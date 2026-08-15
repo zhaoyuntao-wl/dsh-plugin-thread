@@ -46,6 +46,10 @@ dsh 所有插件都要在 profile 的 bundles 里引用才生效（dsh 通用流
         failOnStartupError: true
 ```
 
+## 会话临时隔离（B⑧）
+
+同项目双代理并行做不相关工作时，用自然语言（"隔离/静默/别打扰"）或 `/isolate` 隔离本会话——对话上下文（消息/决策/反馈）仅自己可见，状态卡只列本会话内容（不被其他代理更新干扰）；工具事件仍共享。`/unisolate` 解除（历史仍隔离），`/thread-publish <goal|decision|feedback> <id>` 或自然语言"把这个决策共享出去"按需沉淀转共享。
+
 ## 版本约束
 
 钉 dsh `0.1.0-rc.6`（peer 依赖）；跟随 dsh release train 适配，compat 矩阵见 CI。
