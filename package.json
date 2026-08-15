@@ -1,7 +1,7 @@
 {
-  "name": "@thread/adapter-dsh",
+  "name": "dsh-thread",
   "version": "0.0.0",
-  "description": "Thread dsh adapter — session capture + status-card injection (dsh plugin).",
+  "description": "Thread session memory for dsh — lossless event capture + status-card injection (flagship dsh plugin).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,7 +22,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@thread/core": "workspace:*"
+    "@thread/core": "workspace:*",
+    "better-sqlite3": "^12.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
