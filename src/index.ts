@@ -10,6 +10,7 @@ import {
   buildStatusCard,
   defaultPaths,
   deriveProjectKey,
+  matchToolFeedback,
 } from '@thread/core'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -19,6 +20,10 @@ export const name = 'dsh-thread'
 export const inject = ['tools']
 
 const PLUGIN_NAME = name
+
+interface ToolGuardRuntime {
+  guard(guard: (execution: { name: string; agent?: { session?: { id?: unknown } } }) => string | undefined): void
+}
 
 function extractText(content: readonly ContentBlock[]): string {
   return content
@@ -95,6 +100,26 @@ export function apply(ctx: Context) {
     store = new ThreadStore({ eventsPath: paths.eventsDbPath, structuredPath: paths.structuredDbPath, projectKey })
     return store
   }
+
+  // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）
+  // 返回字符串 = deny，原因即教训原文（dsh-tool-cordis guard 语义实证）
+  ;((ctx as unknown as { tools: ToolGuardRuntime }).tools).guard((execution) => {
+    try {
+      const sessionId = execution.agent?.session?.id
+      if (typeof sessionId !== 'string' && typeof sessionId !== 'number') {
+        return undefined
+      }
+      const s = openStore()
+      const rows = s.getFeedbackMerged(String(sessionId), projectKey, 50)
+      const hit = matchToolFeedback(rows, execution.name)
+      if (hit) {
+        return `[Thread 反馈拦截] 已拦截工具「${execution.name}」——教训（反馈 #${hit.id}）：${hit.text}。请改用其他方式完成，或与用户确认后再执行。`
+      }
+    } catch (err) {
+      console.error(`thread dsh: tool guard failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return undefined
+  })
 
   // 采集：session/event 订阅 → Thread 事件（origin 幂等，SQLITE_BUSY 重试）
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
