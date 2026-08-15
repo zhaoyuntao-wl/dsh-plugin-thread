@@ -44,11 +44,11 @@ export function isOwnInjection(messages: readonly unknown[]): boolean {
   })
 }
 
-// 会话临时隔离指令识别：显式命令 + 自然语言（用户偏好各异，双通道都支持）
-const ISOLATE_RE = /^(?:\/isolate|[/／]isolate)\b|(?:进入|开启|启用|先)?(?:临时)?(?:隔离|静默|免打扰|别打扰|屏蔽)/
-const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate)\b|(?:解除|退出|关闭)(?:隔离|静默)|恢复共享/
-const PUBLISH_CMD_RE = /^\/thread-publish\s+(goal|decision|feedback)\s+(\d+)\b/
-const PUBLISH_NL_RE = /把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目标|偏好)(?:共享|公开|同步)(?:出去|给项目)?/
+// 会话临时隔离指令识别：整条消息 trim 后精确匹配白名单（开放项⑦定案，防讨论性语句误触发）
+const ISOLATE_RE = /^(?:\/isolate|[/／]isolate|隔离|开始隔离|进入隔离|临时隔离|静默|免打扰|别打扰)$/
+const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate|解除隔离|退出隔离|恢复共享)$/
+const PUBLISH_CMD_RE = /^\/thread-publish\s+(goal|decision|feedback)\s+(\d+)$/
+const PUBLISH_NL_RE = /^把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目标|偏好)(?:共享|公开|同步)(?:出去|给项目)?$/
 
 interface IsolationCommand {
   action: 'isolate' | 'unisolate' | 'publish'
@@ -60,19 +60,20 @@ function tableForKind(kind: 'goal' | 'decision' | 'feedback'): 'goals' | 'decisi
   return kind === 'goal' ? 'goals' : kind === 'decision' ? 'decisions' : 'feedback'
 }
 
-function parseIsolationCommand(body: string): IsolationCommand | undefined {
-  if (PUBLISH_CMD_RE.test(body)) {
-    const m = body.match(PUBLISH_CMD_RE)
+export function parseIsolationCommand(body: string): IsolationCommand | undefined {
+  const text = body.trim()
+  if (PUBLISH_CMD_RE.test(text)) {
+    const m = text.match(PUBLISH_CMD_RE)
     return { action: 'publish', kind: m?.[1] as 'goal' | 'decision' | 'feedback', id: Number(m?.[2]) }
   }
-  if (PUBLISH_NL_RE.test(body)) {
+  if (PUBLISH_NL_RE.test(text)) {
     // 自然语言沉淀：作用于本会话最近一条隔离结构化行
     return { action: 'publish' }
   }
-  if (ISOLATE_RE.test(body)) {
+  if (ISOLATE_RE.test(text)) {
     return { action: 'isolate' }
   }
-  if (UNISOLATE_RE.test(body)) {
+  if (UNISOLATE_RE.test(text)) {
     return { action: 'unisolate' }
   }
   return undefined
