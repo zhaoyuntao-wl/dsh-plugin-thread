@@ -1,6 +1,6 @@
 # dsh-thread
 
-Thread 会话记忆的 dsh 旗舰插件——**确定性无损采集**（订阅 `session/event` 写双库）+ **状态卡注入**（`agent/pre-step` 每轮提醒）+ **MCP 查询**（`query_session_memory`）。
+Thread 会话记忆的 dsh 旗舰插件——一个包闭环：**确定性无损采集**（订阅 `session/event` 写双库）+ **状态卡注入**（`agent/pre-step` 每轮提醒）+ **内嵌 MCP server**（`query_session_memory` 查询通道，`dsh-thread` 命令启动）。
 
 - 决策不丢、目标不漂移、不重复提问
 - 跨压缩边界保真：状态卡 O(1) 常驻，细节按需检索回拉
@@ -13,12 +13,39 @@ Thread 会话记忆的 dsh 旗舰插件——**确定性无损采集**（订阅 
 dsh plugin add dsh-thread
 ```
 
-零配置：`better-sqlite3` 依赖随包解决，插件激活后自动采集 + 注入。
+零配置：`@thread/core` + `better-sqlite3` 依赖随包解决，插件激活后自动采集 + 注入。
+
+## 启用（profile）
+
+dsh 所有插件都要在 profile 的 bundles 里引用才生效（dsh 通用流程）。在 `~/.dsh/profiles/<你的 profile>/package.json`：
+
+```json
+{
+  "name": "dsh-profile-my",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-thread"]
+    }
+  }
+}
+```
+
+若要在会话内/Web UI 使用 `query_session_memory` 工具，在 profile 的 `cordis.patch.yml` 加 MCP overlay：
+
+```yaml
+- insert:
+    - id: mcp-thread
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: thread
+        transport: stdio
+        command: npx
+        args: ['dsh-thread']
+        failOnStartupError: true
+```
 
 ## 版本约束
 
 钉 dsh `0.1.0-rc.6`（peer 依赖）；跟随 dsh release train 适配，compat 矩阵见 CI。
-
-## 查询
-
-会话内模型可经 MCP overlay 调 `query_session_memory`（安装 `thread-mcp` 或复用 profile 内 MCP 条目），或任意 MCP 客户端直连。

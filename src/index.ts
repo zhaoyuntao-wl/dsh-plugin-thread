@@ -14,7 +14,7 @@ import {
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-export const name = '@thread/adapter-dsh'
+export const name = 'dsh-thread'
 
 export const inject = ['tools']
 

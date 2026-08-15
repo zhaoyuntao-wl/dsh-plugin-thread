@@ -8,6 +8,9 @@
   "exports": {
     ".": "./dist/index.js"
   },
+  "bin": {
+    "dsh-thread": "./dist/server.js"
+  },
   "files": [
     "dist",
     "cordis.patch.yml"
@@ -22,8 +25,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@thread/core": "workspace:*",
-    "better-sqlite3": "^12.0.0"
+    "better-sqlite3": "^12.0.0",
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
