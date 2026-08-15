@@ -32,6 +32,40 @@ function iso(ms: number): string {
   return new Date(ms).toISOString()
 }
 
+// 会话临时隔离指令识别：显式命令 + 自然语言（用户偏好各异，双通道都支持）
+const ISOLATE_RE = /^(?:\/isolate|[/／]isolate)\b|(?:进入|开启|启用|先)?(?:临时)?(?:隔离|静默|免打扰|别打扰|屏蔽)/
+const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate)\b|(?:解除|退出|关闭)(?:隔离|静默)|恢复共享/
+const PUBLISH_CMD_RE = /^\/thread-publish\s+(goal|decision|feedback)\s+(\d+)\b/
+const PUBLISH_NL_RE = /把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目标|偏好)(?:共享|公开|同步)(?:出去|给项目)?/
+
+interface IsolationCommand {
+  action: 'isolate' | 'unisolate' | 'publish'
+  kind?: 'goal' | 'decision' | 'feedback'
+  id?: number
+}
+
+function tableForKind(kind: 'goal' | 'decision' | 'feedback'): 'goals' | 'decisions' | 'feedback' {
+  return kind === 'goal' ? 'goals' : kind === 'decision' ? 'decisions' : 'feedback'
+}
+
+function parseIsolationCommand(body: string): IsolationCommand | undefined {
+  if (PUBLISH_CMD_RE.test(body)) {
+    const m = body.match(PUBLISH_CMD_RE)
+    return { action: 'publish', kind: m?.[1] as 'goal' | 'decision' | 'feedback', id: Number(m?.[2]) }
+  }
+  if (PUBLISH_NL_RE.test(body)) {
+    // 自然语言沉淀：作用于本会话最近一条隔离结构化行
+    return { action: 'publish' }
+  }
+  if (ISOLATE_RE.test(body)) {
+    return { action: 'isolate' }
+  }
+  if (UNISOLATE_RE.test(body)) {
+    return { action: 'unisolate' }
+  }
+  return undefined
+}
+
 export function apply(ctx: Context) {
   const cwd = process.env.THREAD_CWD ?? process.cwd()
   const projectKey = deriveProjectKey(cwd)
@@ -64,17 +98,32 @@ export function apply(ctx: Context) {
           if (!body) {
             return
           }
+          const sessionId = String(session.id)
+          const cmd = parseIsolationCommand(body)
+          if (cmd?.action === 'isolate') {
+            s.setSessionIsolation(sessionId, true)
+          } else if (cmd?.action === 'unisolate') {
+            s.setSessionIsolation(sessionId, false)
+          } else if (cmd?.action === 'publish') {
+            if (cmd.kind && cmd.id) {
+              s.unisolateRow(sessionId, tableForKind(cmd.kind), cmd.id)
+            } else {
+              publishLatestIsolated(s, sessionId)
+            }
+          }
+          const after = s.getSessionIsolation(sessionId)
           const appended = appendWithRetry(s, {
-            session_id: String(session.id),
+            session_id: sessionId,
             kind: 'user_message',
             ts: iso(event.time),
             body,
-          }, { projectKey, origin: `dsh://msg#${event.data.id}` })
-          applyAnalysis(s, String(session.id), { user_msg: body }, {
+          }, { projectKey, origin: `dsh://msg#${event.data.id}`, isolation: after })
+          applyAnalysis(s, sessionId, { user_msg: body }, {
             sourceEvent: appended.id,
             ts: iso(event.time),
             projectKey,
             origin: `dsh://msg#${event.data.id}`,
+            isolation: after,
           })
           break
         }
@@ -83,12 +132,13 @@ export function apply(ctx: Context) {
           if (!body) {
             return
           }
+          const sessionId = String(session.id)
           appendWithRetry(s, {
-            session_id: String(session.id),
+            session_id: sessionId,
             kind: 'assistant_message',
             ts: iso(event.time),
             body,
-          }, { projectKey, origin: `dsh://msg#${event.data.message.id}` })
+          }, { projectKey, origin: `dsh://msg#${event.data.message.id}`, isolation: s.getSessionIsolation(sessionId) })
           break
         }
         case 'tool/call': {
@@ -133,7 +183,12 @@ export function apply(ctx: Context) {
       const s = openStore()
       const sessionId = payload.agent.session?.id ?? ''
       const card = sessionId
-        ? buildStatusCard(s, { sessionId: String(sessionId), projectKey, budgetLines: 200 })
+        ? buildStatusCard(s, {
+            sessionId: String(sessionId),
+            projectKey,
+            budgetLines: 200,
+            isolated: s.getSessionIsolation(String(sessionId)),
+          })
         : '[Thread 会话记忆状态卡]'
       payload.agent.inject(createUserMessage({
         content: [{ type: 'text', text: card }],
@@ -157,6 +212,19 @@ function appendWithRetry(store: ThreadStore, event: Parameters<ThreadStore['appe
       }
     }
     throw err
+  }
+}
+
+// 自然语言沉淀兜底：把本会话最近一条隔离的结构化行转共享
+function publishLatestIsolated(store: ThreadStore, sessionId: string): void {
+  for (const table of ['decisions', 'feedback', 'goals'] as const) {
+    const row = store.structuredDb
+      .prepare(`SELECT id FROM ${table} WHERE session_id = ? AND isolation = 1 ORDER BY id DESC LIMIT 1`)
+      .get(sessionId) as { id: number } | undefined
+    if (row) {
+      store.unisolateRow(sessionId, table, row.id)
+      return
+    }
   }
 }
 
