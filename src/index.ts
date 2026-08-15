@@ -32,6 +32,18 @@ function iso(ms: number): string {
   return new Date(ms).toISOString()
 }
 
+// 卡片独立成轮守卫：inject 的消息会被 dsh agent-loop 当新 turn 输入再驱动一轮
+//（inbox hasPending → wakeDriver），该轮 claimed 消息全部是本插件注入时视为纯卡片轮。
+export function isOwnInjection(messages: readonly unknown[]): boolean {
+  if (messages.length === 0) {
+    return false
+  }
+  return messages.every((m) => {
+    const source = (m as { source?: { kind?: string; plugin?: string } }).source
+    return source?.kind === 'plugin' && source?.plugin === PLUGIN_NAME
+  })
+}
+
 // 会话临时隔离指令识别：显式命令 + 自然语言（用户偏好各异，双通道都支持）
 const ISOLATE_RE = /^(?:\/isolate|[/／]isolate)\b|(?:进入|开启|启用|先)?(?:临时)?(?:隔离|静默|免打扰|别打扰|屏蔽)/
 const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate)\b|(?:解除|退出|关闭)(?:隔离|静默)|恢复共享/
@@ -176,6 +188,9 @@ export function apply(ctx: Context) {
   // 注意：pre-step 的 step 从 1 开始，按 turn 去重即可，不能判 step === 0
   const injectedTurns = new Set<number>()
   ctx.on('agent/pre-step', async (payload, next) => {
+    if (isOwnInjection((payload as { messages?: readonly unknown[] }).messages ?? [])) {
+      return next()
+    }
     const turn = payload.turn
     if (injectedTurns.has(turn)) return next()
     injectedTurns.add(turn)
