@@ -67,7 +67,7 @@ pnpm test
 pnpm lint
 ```
 
-开发期 `@thread/core` 经 `file:../thread/packages/core` 链接；core API 稳定后切换为 npm 版本。
+开发期 `@thread/core` 经 `file:../thread/packages/core` 链接（CI 仅在 core 发布 npm 并切换为版本依赖后跑完整链路，见 `.github/workflows/ci.yml`）。
 
 ## 许可证
 

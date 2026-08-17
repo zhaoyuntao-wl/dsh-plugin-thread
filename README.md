@@ -87,8 +87,9 @@ pnpm test
 pnpm lint
 ```
 
-`@thread/core` is linked via `file:../thread/packages/core` during development;
-switch to an npm version once the core API stabilizes.
+`@thread/core` is linked via `file:../thread/packages/core` during development
+(CI runs the full chain only once core is published to npm and the dependency
+switches to a version; see `.github/workflows/ci.yml`).
 
 ## License
 
