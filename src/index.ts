@@ -229,6 +229,7 @@ export function apply(ctx: Context) {
             projectKey,
             budgetLines: 200,
             isolated: s.getSessionIsolation(String(sessionId)),
+            firstTurn: turn === 1,
           })
         : '[Thread 会话记忆状态卡]'
       payload.agent.inject(createUserMessage({
