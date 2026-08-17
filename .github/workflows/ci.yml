@@ -22,12 +22,12 @@ jobs:
       # skipped; the local chain (pnpm typecheck && lint && test) covers it.
       # Once core is published to npm and the dependency switches to a version,
       # this guard automatically enables the full chain.
-      - name: Check dev-mode dependency (file: link)
+      - name: Check dev-mode dependency (file link)
         id: dev-mode
         run: |
           if grep -q '"@thread-memory/core": "file:' package.json; then
             echo "dev-mode=1" >> "$GITHUB_OUTPUT"
-            echo "dev mode: file: link - CI skipped"
+            echo "dev mode: file link - CI skipped"
           else
             echo "dev-mode=0" >> "$GITHUB_OUTPUT"
           fi
@@ -64,7 +64,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - name: Check dev-mode dependency (file: link)
+      - name: Check dev-mode dependency (file link)
         id: dev-mode
         run: |
           if grep -q '"@thread-memory/core": "file:' package.json; then
