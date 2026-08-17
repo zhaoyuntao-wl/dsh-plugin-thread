@@ -17,13 +17,13 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      # 开发期 @thread/core 走 file: link 到私有主仓（CI 环境无主仓），
+      # 开发期 @thread-memory/core 走 file: link 到私有主仓（CI 环境无主仓），
       # 依赖无法解析，CI 跳过——本地验证链（pnpm typecheck && lint && test）已覆盖。
-      # @thread/core 发布 npm 版本并切换依赖后，本 guard 自动放行完整链路。
+      # core 发布 npm 版本并切换依赖后，本 guard 自动放行完整链路。
       - name: Check dev-mode dependency (file: link)
         id: dev-mode
         run: |
-          if grep -q '"@thread/core": "file:' package.json; then
+          if grep -q '"@thread-memory/core": "file:' package.json; then
             echo "dev-mode=1" >> "$GITHUB_OUTPUT"
             echo "dev mode: @thread/core via file: link — CI skipped until core publishes to npm"
           else

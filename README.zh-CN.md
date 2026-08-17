@@ -8,7 +8,7 @@
 
 能力承诺：决策不丢、目标不漂移、不重复提问——跨长任务、跨压缩边界、跨新会话。
 
-> **仓库关系**：本仓库是 [Thread](https://github.com/zhaoyuntao-wl/thread) 的 dsh 深度接入适配器；通用内核（`@thread/core`）与薄接入的 Qoder 适配器在 Thread 主仓库。
+> **仓库关系**：本仓库是 [Thread](https://github.com/zhaoyuntao-wl/thread) 的 dsh 深度接入适配器；通用内核（`@thread-memory/core`）与薄接入的 Qoder 适配器在 Thread 主仓库。
 
 ## 安装
 
@@ -16,7 +16,7 @@
 dsh plugin add dsh-thread
 ```
 
-零配置：`@thread/core` + `better-sqlite3` 依赖随包解决；插件激活即开始采集与注入。
+零配置：`@thread-memory/core` + `better-sqlite3` 依赖随包解决；插件激活即开始采集与注入。
 
 ## 启用（profile）
 
@@ -67,7 +67,7 @@ pnpm test
 pnpm lint
 ```
 
-开发期 `@thread/core` 经 `file:../thread/packages/core` 链接（CI 仅在 core 发布 npm 并切换为版本依赖后跑完整链路，见 `.github/workflows/ci.yml`）。
+开发期 `@thread-memory/core` 经 `file:../thread/packages/core` 链接（CI 仅在 core 发布 npm 并切换为版本依赖后跑完整链路，见 `.github/workflows/ci.yml`）。
 
 ## 许可证
 

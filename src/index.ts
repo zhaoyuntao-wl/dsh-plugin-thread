@@ -13,7 +13,7 @@ import {
   defaultPaths,
   deriveProjectKey,
   matchToolFeedback,
-} from '@thread/core'
+} from '@thread-memory/core'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'

@@ -18,7 +18,7 @@ across long tasks, compaction boundaries, and new sessions.
 
 > **Repository relationship**: this is the dsh deep-adapter for
 > [Thread](https://github.com/zhaoyuntao-wl/thread). The general kernel
-> (`@thread/core`) and the thin Qoder adapter live in the main Thread repository.
+> (`@thread-memory/core`) and the thin Qoder adapter live in the main Thread repository.
 
 ## Install
 
@@ -26,7 +26,7 @@ across long tasks, compaction boundaries, and new sessions.
 dsh plugin add dsh-thread
 ```
 
-Zero configuration: `@thread/core` + `better-sqlite3` resolve as dependencies;
+Zero configuration: `@thread-memory/core` + `better-sqlite3` resolve as dependencies;
 capture and injection start as soon as the plugin is activated.
 
 ## Enable (profile)
@@ -87,7 +87,7 @@ pnpm test
 pnpm lint
 ```
 
-`@thread/core` is linked via `file:../thread/packages/core` during development
+`@thread-memory/core` is linked via `file:../thread/packages/core` during development
 (CI runs the full chain only once core is published to npm and the dependency
 switches to a version; see `.github/workflows/ci.yml`).
 
