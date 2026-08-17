@@ -1,6 +1,8 @@
-# dsh-thread
+# dsh-plugin-thread
 
-Thread 会话记忆的 dsh 旗舰插件——一个包闭环：**确定性无损采集**（订阅 `session/event` 写双库）+ **状态卡注入**（`agent/pre-step` 每轮提醒）+ **内嵌 MCP server**（`query_session_memory` 查询通道，`dsh-thread` 命令启动）。
+DeepSeek Harness 插件仓库——Thread 会话记忆的 dsh 适配器（包名 `dsh-thread`），一个包闭环：**确定性无损采集**（订阅 `session/event` 写双库）+ **状态卡注入**（`agent/pre-step` 每轮提醒）+ **内嵌 MCP server**（`query_session_memory` 查询通道，`dsh-thread` 命令启动）。
+
+> **仓库关系**：本仓库是 Thread 的 dsh 深度接入适配器（独立发布、跟随 dsh release train）。通用内核与薄接入适配器（Qoder）在 [thread](https://github.com/zhaoyuntao-wl/thread) 主仓库。
 
 - 决策不丢、目标不漂移、不重复提问
 - 跨压缩边界保真：状态卡 O(1) 常驻，细节按需检索回拉

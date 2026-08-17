@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+coverage/
+
+# environment & secrets
+.env
+.env.*
+!.env.example
+
+# logs & temp
+*.log
+.DS_Store
+Thumbs.db
+
+# AI coding agent local config (never shared)
+.qoder/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.windsurf/
+
+# Thread runtime data (local session memory store)
+.thread/
