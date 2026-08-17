@@ -49,14 +49,15 @@ export function isOwnInjection(messages: readonly unknown[]): boolean {
   })
 }
 
-// 会话临时隔离指令识别：整条消息 trim 后精确匹配白名单（开放项⑦定案，防讨论性语句误触发）
+// 会话指令识别：整条消息 trim 后精确匹配白名单（隔离 ⑦定案 + 反馈治理恢复通道）
 const ISOLATE_RE = /^(?:\/isolate|[/／]isolate|隔离|开始隔离|进入隔离|临时隔离|静默|免打扰|别打扰)$/
 const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate|解除隔离|退出隔离|恢复共享)$/
 const PUBLISH_CMD_RE = /^\/thread-publish\s+(goal|decision|feedback)\s+(\d+)$/
 const PUBLISH_NL_RE = /^把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目标|偏好)(?:共享|公开|同步)(?:出去|给项目)?$/
+const FEEDBACK_DEL_RE = /^\/feedback-del\s+(\d+)$/
 
 interface IsolationCommand {
-  action: 'isolate' | 'unisolate' | 'publish'
+  action: 'isolate' | 'unisolate' | 'publish' | 'feedback-del'
   kind?: 'goal' | 'decision' | 'feedback'
   id?: number
 }
@@ -67,6 +68,10 @@ function tableForKind(kind: 'goal' | 'decision' | 'feedback'): 'goals' | 'decisi
 
 export function parseIsolationCommand(body: string): IsolationCommand | undefined {
   const text = body.trim()
+  const delMatch = text.match(FEEDBACK_DEL_RE)
+  if (delMatch) {
+    return { action: 'feedback-del', id: Number(delMatch[1]) }
+  }
   if (PUBLISH_CMD_RE.test(text)) {
     const m = text.match(PUBLISH_CMD_RE)
     return { action: 'publish', kind: m?.[1] as 'goal' | 'decision' | 'feedback', id: Number(m?.[2]) }
@@ -148,6 +153,9 @@ export function apply(ctx: Context) {
             } else {
               publishLatestIsolated(s, sessionId)
             }
+          } else if (cmd?.action === 'feedback-del' && cmd.id) {
+            // 反馈治理恢复通道：删除教训行（教训可删即恢复，B⑥-②）
+            s.deleteFeedback(cmd.id)
           }
           const after = s.getSessionIsolation(sessionId)
           const appended = appendWithRetry(s, {

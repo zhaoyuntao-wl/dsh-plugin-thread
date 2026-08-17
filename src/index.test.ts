@@ -51,6 +51,11 @@ describe("parseIsolationCommand（⑦ 整条消息白名单，防讨论性语句
     expect(parseIsolationCommand("把刚才的偏好同步给项目")).toEqual({ action: "publish" });
   });
 
+  it("反馈恢复命令触发 feedback-del（B⑥-② 恢复通道）", () => {
+    expect(parseIsolationCommand("/feedback-del 7")).toEqual({ action: "feedback-del", id: 7 });
+    expect(parseIsolationCommand("/feedback-del abc")).toBeUndefined();
+  });
+
   it("讨论性语句不触发（2026-08-15 误触发回归，events id 5124）", () => {
     for (const text of [
       "隔离的判定规则是什么",
