@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { ThreadStore, queryMemory, queryEvents, THREAD_VERSION, defaultPaths } from "@thread/core";
+import { ThreadStore, queryMemory, queryEvents, queryStructured, THREAD_VERSION, defaultPaths } from "@thread/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -27,9 +27,9 @@ server.tool(
     token_budget: z.number().int().positive().optional().describe("返回结果 token 预算，默认 4000"),
     session_id: z.string().optional().describe("会话 ID；缺省使用最近活跃会话"),
     limit: z.number().int().positive().max(50).optional().describe("最大返回片段数，默认 20"),
-    kind: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "compact_checkpoint"]).optional().describe("按事件类型过滤（精确查询路径，如审计/抽查）"),
-    since: z.string().optional().describe("时间下界 ISO（精确查询路径，如 '2026-08-14T01:00:00Z'）"),
-    until: z.string().optional().describe("时间上界 ISO（精确查询路径）"),
+    kind: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "compact_checkpoint", "goal", "decision", "feedback"]).optional().describe("按类型过滤：事件类（精确查询路径）或结构化表类 goal/decision/feedback（目标/决策/偏好行）"),
+    since: z.string().optional().describe("时间下界 ISO（精确查询路径，如 '2026-08-14T01:00:00Z'；结构化表类忽略）"),
+    until: z.string().optional().describe("时间上界 ISO（精确查询路径；结构化表类忽略）"),
     order: z.enum(["asc", "desc"]).optional().describe("排序方向，默认 desc（最近优先）"),
     count_only: z.boolean().optional().describe("只返回计数（如'调了几次某工具'）"),
   },
@@ -42,26 +42,42 @@ server.tool(
         ],
       };
     }
+    const TABLE_KIND: Record<string, "goals" | "decisions" | "feedback"> = {
+      goal: "goals",
+      decision: "decisions",
+      feedback: "feedback",
+    };
+    const EVENT_KINDS = ["user_message", "assistant_message", "tool_call", "tool_result", "compact_checkpoint"] as const;
+    const table = typeof args.kind === "string" ? TABLE_KIND[args.kind] : undefined;
+    const eventKind = typeof args.kind === "string" && (EVENT_KINDS as readonly string[]).includes(args.kind) ? (args.kind as (typeof EVENT_KINDS)[number]) : undefined;
     const structured =
       args.kind !== undefined ||
       args.since !== undefined ||
       args.until !== undefined ||
       args.order !== undefined ||
       args.count_only === true;
-    const result = structured
-      ? queryEvents(store, {
+    const result = table
+      ? queryStructured(store, {
           sessionId,
-          kind: args.kind,
-          timeRange: { since: args.since, until: args.until },
+          table,
           order: args.order,
           limit: args.limit,
           count: args.count_only,
         })
-      : queryMemory(store, args.query, {
-          tokenBudget: args.token_budget,
-          sessionId,
-          limit: args.limit,
-        });
+      : structured
+        ? queryEvents(store, {
+            sessionId,
+            kind: eventKind,
+            timeRange: { since: args.since, until: args.until },
+            order: args.order,
+            limit: args.limit,
+            count: args.count_only,
+          })
+        : queryMemory(store, args.query, {
+            tokenBudget: args.token_budget,
+            sessionId,
+            limit: args.limit,
+          });
     return {
       content: [{ type: "text" as const, text: JSON.stringify({ ...result, session_isolation: store.getSessionIsolation(sessionId) }, null, 2) }],
     };
