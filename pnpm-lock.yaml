@@ -25,16 +25,16 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
       '@deepseek-ai/dsh-agent':
-        specifier: 0.1.0-rc.6
+        specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(0b30f02db9c316d5c7e45c50c9805998)
       '@deepseek-ai/dsh-llm':
-        specifier: 0.1.0-rc.6
+        specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))
       '@deepseek-ai/dsh-session':
-        specifier: 0.1.0-rc.6
+        specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(7c206068df7621a084f2df242cb8569b)
       '@deepseek-ai/dsh-tools':
-        specifier: 0.1.0-rc.6
+        specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(8d36de2abc377789f904eb7ef80e4732)
       '@types/node':
         specifier: ^22.10.0
