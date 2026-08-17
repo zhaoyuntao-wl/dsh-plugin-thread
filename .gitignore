@@ -26,3 +26,6 @@ Thumbs.db
 
 # Thread runtime data (local session memory store)
 .thread/
+
+# Internal development docs (kept locally, excluded from public repo)
+docs/local/
