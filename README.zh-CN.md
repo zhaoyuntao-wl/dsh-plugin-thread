@@ -1,5 +1,7 @@
 # dsh-plugin-thread
 
+[![CI](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml)
+
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的插件，把 **Thread**（底座无关的编码 Agent 会话记忆层）以单包闭环形式接入 dsh：
 
 - **无损采集**：订阅 `session/event`，把完整事件流（用户消息 / Agent 回复 / 工具调用与结果）持久化到双 SQLite 库。
@@ -55,7 +57,7 @@ dsh 所有插件都要在 profile 的 `bundles` 里引用才生效。在 `~/.dsh
 
 ## 版本约束
 
-钉 dsh `0.1.0-rc.6`（peer 依赖）；跟随 dsh release train 适配，compat 矩阵见 CI。
+peer 依赖使用 `^0.1.0-rc.6`（兼容 rc.6/rc.7 版本线）；跟随 dsh release train 适配，compat 矩阵见 CI。
 
 ## 开发
 

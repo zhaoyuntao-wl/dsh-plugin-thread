@@ -1,5 +1,7 @@
 # dsh-plugin-thread
 
+[![CI](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml)
+
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
 brings **Thread** — a base-agnostic session memory layer for coding agents — to
 dsh as a one-package closed loop:
@@ -74,8 +76,8 @@ language "把这个决策共享出去") promotes a row back to shared visibility
 
 ## Version pinning
 
-Pinned to dsh `0.1.0-rc.6` (peer dependency); adapts to the dsh release train,
-compat matrix in CI.
+Peer dependencies use `^0.1.0-rc.6` (compatible with the rc.6/rc.7 train);
+adapts to the dsh release train, compat matrix in CI.
 
 ## Development
 
