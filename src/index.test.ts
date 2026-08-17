@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isOwnInjection, parseIsolationCommand } from "./index.js";
+import { Config, isOwnInjection, parseIsolationCommand } from "./index.js";
 
 describe("isOwnInjection（卡片独立成轮守卫，B⑧ 迭代）", () => {
   it("空消息列表 → false（正常注入）", () => {
@@ -72,5 +72,31 @@ describe("parseIsolationCommand（⑦ 整条消息白名单，防讨论性语句
   it("前后空白不影响识别", () => {
     expect(parseIsolationCommand("  隔离  ")).toEqual({ action: "isolate" });
     expect(parseIsolationCommand("  /unisolate\r\n")).toEqual({ action: "unisolate" });
+  });
+});
+
+describe("Config（官方 basic/config：插件配置经 Standard Schema 校验后注入 apply）", () => {
+  it("缺省字段由 schema 填充默认值（budgetLines 200 / feedbackRows 50 / 重试 20×100ms）", () => {
+    expect(Config.parse({})).toEqual({
+      budgetLines: 200,
+      feedbackRows: 50,
+      busyRetries: 20,
+      busyRetryDelayMs: 100,
+    });
+  });
+
+  it("覆盖写生效（部署差异化配置）", () => {
+    expect(Config.parse({ budgetLines: 120, feedbackRows: 80, busyRetries: 5, busyRetryDelayMs: 250 })).toEqual({
+      budgetLines: 120,
+      feedbackRows: 80,
+      busyRetries: 5,
+      busyRetryDelayMs: 250,
+    });
+  });
+
+  it("非法值拒绝（非正数/非整数），不静默通过", () => {
+    expect(() => Config.parse({ budgetLines: -1 })).toThrow();
+    expect(() => Config.parse({ busyRetries: 2.5 })).toThrow();
+    expect(() => Config.parse({ feedbackRows: "many" })).toThrow();
   });
 });

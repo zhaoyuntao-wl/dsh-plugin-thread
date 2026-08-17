@@ -3,6 +3,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+// dsh-tools 声明合并 ctx.tools: ToolRuntime（官方类型，guard 签名与 Context 注入一致）
+import type {} from '@deepseek-ai/dsh-tools'
 import { createUserMessage, type ContentBlock, type ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import {
   ThreadStore,
@@ -14,6 +16,7 @@ import {
 } from '@thread/core'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { z } from 'zod'
 
 export const name = 'dsh-thread'
 
@@ -21,9 +24,15 @@ export const inject = ['tools']
 
 const PLUGIN_NAME = name
 
-interface ToolGuardRuntime {
-  guard(guard: (execution: { name: string; agent?: { session?: { id?: unknown } } }) => string | undefined): void
-}
+// 插件配置（官方 basic/config 规范：不同部署取值可变的参数必须定义为配置字段，
+// zod v4 实现 Standard Schema，cordis 校验后注入 apply 第二参）
+export const Config = z.object({
+  budgetLines: z.number().int().positive().default(200),
+  feedbackRows: z.number().int().positive().default(50),
+  busyRetries: z.number().int().positive().default(20),
+  busyRetryDelayMs: z.number().int().positive().default(100),
+})
+export type Config = z.infer<typeof Config>
 
 function extractText(content: readonly ContentBlock[]): string {
   return content
@@ -89,7 +98,11 @@ export function parseIsolationCommand(body: string): IsolationCommand | undefine
   return undefined
 }
 
-export function apply(ctx: Context) {
+export function apply(ctx: Context, config: Config) {
+  const budgetLines = config.budgetLines ?? 200
+  const feedbackRows = config.feedbackRows ?? 50
+  const busyRetries = config.busyRetries ?? 20
+  const busyRetryDelayMs = config.busyRetryDelayMs ?? 100
   const cwd = process.env.THREAD_CWD ?? process.cwd()
   const projectKey = deriveProjectKey(cwd)
   const paths = defaultPaths(cwd)
@@ -106,24 +119,31 @@ export function apply(ctx: Context) {
     return store
   }
 
-  // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）
-  // 返回字符串 = deny，原因即教训原文（dsh-tool-cordis guard 语义实证）
-  ;((ctx as unknown as { tools: ToolGuardRuntime }).tools).guard((execution) => {
-    try {
-      const sessionId = execution.agent?.session?.id
-      if (typeof sessionId !== 'string' && typeof sessionId !== 'number') {
-        return undefined
+  // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）。
+  // 官方 ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined；
+  // guard() 返回 disposer，经 ctx.effect 注册后在插件卸载/HMR 时连同 SQLite 连接一起清理。
+  ctx.effect(() => {
+    const disposeGuard = ctx.tools.guard((execution) => {
+      try {
+        const sessionId = execution.agent?.session?.id
+        if (typeof sessionId !== 'string' && typeof sessionId !== 'number') {
+          return undefined
+        }
+        const s = openStore()
+        const rows = s.getFeedbackMerged(String(sessionId), projectKey, feedbackRows)
+        const hit = matchToolFeedback(rows, execution.name)
+        if (hit) {
+          return `[Thread 反馈拦截] 已拦截工具「${execution.name}」——教训（反馈 #${hit.id}）：${hit.text}。请改用其他方式完成，或与用户确认后再执行。`
+        }
+      } catch (err) {
+        console.error(`thread dsh: tool guard failed: ${err instanceof Error ? err.message : String(err)}`)
       }
-      const s = openStore()
-      const rows = s.getFeedbackMerged(String(sessionId), projectKey, 50)
-      const hit = matchToolFeedback(rows, execution.name)
-      if (hit) {
-        return `[Thread 反馈拦截] 已拦截工具「${execution.name}」——教训（反馈 #${hit.id}）：${hit.text}。请改用其他方式完成，或与用户确认后再执行。`
-      }
-    } catch (err) {
-      console.error(`thread dsh: tool guard failed: ${err instanceof Error ? err.message : String(err)}`)
+      return undefined
+    })
+    return () => {
+      disposeGuard()
+      store?.close()
     }
-    return undefined
   })
 
   // 采集：session/event 订阅 → Thread 事件（origin 幂等，SQLITE_BUSY 重试）
@@ -163,7 +183,7 @@ export function apply(ctx: Context) {
             kind: 'user_message',
             ts: iso(event.time),
             body,
-          }, { projectKey, origin: `dsh://msg#${event.data.id}`, isolation: after })
+          }, { projectKey, origin: `dsh://msg#${event.data.id}`, isolation: after }, busyRetries, busyRetryDelayMs)
           applyAnalysis(s, sessionId, { user_msg: body }, {
             sourceEvent: appended.id,
             ts: iso(event.time),
@@ -184,7 +204,7 @@ export function apply(ctx: Context) {
             kind: 'assistant_message',
             ts: iso(event.time),
             body,
-          }, { projectKey, origin: `dsh://msg#${event.data.message.id}`, isolation: s.getSessionIsolation(sessionId) })
+          }, { projectKey, origin: `dsh://msg#${event.data.message.id}`, isolation: s.getSessionIsolation(sessionId) }, busyRetries, busyRetryDelayMs)
           break
         }
         case 'tool/call': {
@@ -194,7 +214,7 @@ export function apply(ctx: Context) {
             ts: iso(event.time),
             body: `${event.data.name} 调用参数：${event.data.arguments.slice(0, 2000)}`,
             meta: { tool_name: event.data.name, call_id: event.data.callId },
-          }, { projectKey, origin: `dsh://tool#${event.data.callId}` })
+          }, { projectKey, origin: `dsh://tool#${event.data.callId}` }, busyRetries, busyRetryDelayMs)
           break
         }
         case 'tool/result': {
@@ -207,7 +227,7 @@ export function apply(ctx: Context) {
             ts: iso(event.time),
             body: body.slice(0, 2000),
             meta: { call_id: callId },
-          }, { projectKey, origin: `dsh://toolresult#${callId}` })
+          }, { projectKey, origin: `dsh://toolresult#${callId}` }, busyRetries, busyRetryDelayMs)
           break
         }
         default:
@@ -235,7 +255,7 @@ export function apply(ctx: Context) {
         ? buildStatusCard(s, {
             sessionId: String(sessionId),
             projectKey,
-            budgetLines: 200,
+            budgetLines,
             isolated: s.getSessionIsolation(String(sessionId)),
             firstTurn: turn === 1,
           })
@@ -251,14 +271,14 @@ export function apply(ctx: Context) {
   })
 }
 
-function appendWithRetry(store: ThreadStore, event: Parameters<ThreadStore['append']>[0], opts: Parameters<ThreadStore['append']>[1], tries = 0) {
+function appendWithRetry(store: ThreadStore, event: Parameters<ThreadStore['append']>[0], opts: Parameters<ThreadStore['append']>[1], retries: number, retryDelayMs: number, tries = 0) {
   try {
     return store.append(event, opts)
   } catch (err) {
     if ((err as { code?: string })?.code === 'SQLITE_BUSY' || String(err).includes('database is locked')) {
-      if (tries < 20) {
-        sleepSync(100)
-        return appendWithRetry(store, event, opts, tries + 1)
+      if (tries < retries) {
+        sleepSync(retryDelayMs)
+        return appendWithRetry(store, event, opts, retries, retryDelayMs, tries + 1)
       }
     }
     throw err
