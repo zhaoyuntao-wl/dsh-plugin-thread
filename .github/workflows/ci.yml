@@ -17,15 +17,17 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      # 开发期 @thread-memory/core 走 file: link 到私有主仓（CI 环境无主仓），
-      # 依赖无法解析，CI 跳过——本地验证链（pnpm typecheck && lint && test）已覆盖。
-      # core 发布 npm 版本并切换依赖后，本 guard 自动放行完整链路。
+      # During development @thread-memory/core is a file: link to the private
+      # main repo (not available in CI), so the chain cannot resolve and is
+      # skipped; the local chain (pnpm typecheck && lint && test) covers it.
+      # Once core is published to npm and the dependency switches to a version,
+      # this guard automatically enables the full chain.
       - name: Check dev-mode dependency (file: link)
         id: dev-mode
         run: |
           if grep -q '"@thread-memory/core": "file:' package.json; then
             echo "dev-mode=1" >> "$GITHUB_OUTPUT"
-            echo "dev mode: @thread/core via file: link — CI skipped until core publishes to npm"
+            echo "dev mode: file: link - CI skipped"
           else
             echo "dev-mode=0" >> "$GITHUB_OUTPUT"
           fi
@@ -45,14 +47,14 @@ jobs:
         if: steps.dev-mode.outputs.dev-mode == '0'
         run: pnpm test
 
-  # dsh-thread compat 矩阵（发布门槛：钉版本 + 随 dsh release train 持续适配）。
-  # dsh preview 出新版本时在 matrix 追加，验证插件 API 编译期兼容。
-  # 与 check 同样受 dev-mode guard 约束（core 未发布 npm 前无法独立安装）。
+  # dsh-thread compat matrix (release gate: pin + adapt to the dsh release
+  # train). Append new dsh versions here as previews land; verifies compile-time
+  # API compatibility. Same dev-mode guard as check (core must be on npm first).
   compat-dsh:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dsh-version: [0.1.0-rc.6]
+        dsh-version: [0.1.0-rc.6, 0.1.0-rc.7]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -65,7 +67,7 @@ jobs:
       - name: Check dev-mode dependency (file: link)
         id: dev-mode
         run: |
-          if grep -q '"@thread/core": "file:' package.json; then
+          if grep -q '"@thread-memory/core": "file:' package.json; then
             echo "dev-mode=1" >> "$GITHUB_OUTPUT"
             echo "dev mode: CI skipped until core publishes to npm"
           else
