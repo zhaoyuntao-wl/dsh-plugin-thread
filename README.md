@@ -1,25 +1,38 @@
 # dsh-plugin-thread
 
-DeepSeek Harness 插件仓库——Thread 会话记忆的 dsh 适配器（包名 `dsh-thread`），一个包闭环：**确定性无损采集**（订阅 `session/event` 写双库）+ **状态卡注入**（`agent/pre-step` 每轮提醒）+ **内嵌 MCP server**（`query_session_memory` 查询通道，`dsh-thread` 命令启动）。
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
+brings **Thread** — a base-agnostic session memory layer for coding agents — to
+dsh as a one-package closed loop:
 
-> **仓库关系**：本仓库是 Thread 的 dsh 深度接入适配器（独立发布、跟随 dsh release train）。通用内核与薄接入适配器（Qoder）在 [thread](https://github.com/zhaoyuntao-wl/thread) 主仓库。
+- **Lossless capture**: subscribes to `session/event` and persists the full event
+  stream (user messages, assistant replies, tool calls/results) to dual SQLite
+  databases.
+- **Status-card injection**: injects a per-turn status card via `agent/pre-step`
+  — goals, active decisions, and feedback stay resident with O(1) bounded context.
+- **Embedded MCP server**: `query_session_memory` retrieval (semantic BM25 +
+  structured queries) via the `dsh-thread` binary, mountable as a zero-code MCP
+  overlay.
 
-- 决策不丢、目标不漂移、不重复提问
-- 跨压缩边界保真：状态卡 O(1) 常驻，细节按需检索回拉
-- 跨会话继承：新会话开场自动继承项目 active 决策与全局偏好
-- 与底座同仓库零污染：事件写 `~/.thread/projects/<项目键>/events.db`，项目目录无 DB
+Guarantees: decisions never lost, goals never drift, no repeated questions —
+across long tasks, compaction boundaries, and new sessions.
 
-## 安装（一条命令）
+> **Repository relationship**: this is the dsh deep-adapter for
+> [Thread](https://github.com/zhaoyuntao-wl/thread). The general kernel
+> (`@thread/core`) and the thin Qoder adapter live in the main Thread repository.
+
+## Install
 
 ```sh
 dsh plugin add dsh-thread
 ```
 
-零配置：`@thread/core` + `better-sqlite3` 依赖随包解决，插件激活后自动采集 + 注入。
+Zero configuration: `@thread/core` + `better-sqlite3` resolve as dependencies;
+capture and injection start as soon as the plugin is activated.
 
-## 启用（profile）
+## Enable (profile)
 
-dsh 所有插件都要在 profile 的 bundles 里引用才生效（dsh 通用流程）。在 `~/.dsh/profiles/<你的 profile>/package.json`：
+All dsh plugins must be referenced in a profile's `bundles` to take effect. In
+`~/.dsh/profiles/<your-profile>/package.json`:
 
 ```json
 {
@@ -34,7 +47,8 @@ dsh 所有插件都要在 profile 的 bundles 里引用才生效（dsh 通用流
 }
 ```
 
-若要在会话内/Web UI 使用 `query_session_memory` 工具，在 profile 的 `cordis.patch.yml` 加 MCP overlay：
+To use `query_session_memory` in-session / in the Web UI, add the MCP overlay in
+the profile's `cordis.patch.yml`:
 
 ```yaml
 - insert:
@@ -48,10 +62,34 @@ dsh 所有插件都要在 profile 的 bundles 里引用才生效（dsh 通用流
         failOnStartupError: true
 ```
 
-## 会话临时隔离（B⑧）
+## Session isolation
 
-同项目双代理并行做不相关工作时，用自然语言（"隔离/静默/别打扰"）或 `/isolate` 隔离本会话——对话上下文（消息/决策/反馈）仅自己可见，状态卡只列本会话内容（不被其他代理更新干扰）；工具事件仍共享。`/unisolate` 解除（历史仍隔离），`/thread-publish <goal|decision|feedback> <id>` 或自然语言"把这个决策共享出去"按需沉淀转共享。
+When two agents work in parallel on unrelated tasks in the same project, isolate
+a session with natural language ("隔离/静默/别打扰") or `/isolate` — its dialogue
+context (messages/decisions/feedback) becomes visible only to itself, and the
+status card stops being disturbed by the other agent's updates; tool events stay
+shared (project facts stay continuous). `/unisolate` lifts isolation (history
+stays isolated), and `/thread-publish <goal|decision|feedback> <id>` (or natural
+language "把这个决策共享出去") promotes a row back to shared visibility on demand.
 
-## 版本约束
+## Version pinning
 
-钉 dsh `0.1.0-rc.6`（peer 依赖）；跟随 dsh release train 适配，compat 矩阵见 CI。
+Pinned to dsh `0.1.0-rc.6` (peer dependency); adapts to the dsh release train,
+compat matrix in CI.
+
+## Development
+
+```sh
+pnpm install
+pnpm build
+pnpm typecheck
+pnpm test
+pnpm lint
+```
+
+`@thread/core` is linked via `file:../thread/packages/core` during development;
+switch to an npm version once the core API stabilizes.
+
+## License
+
+[MIT](./LICENSE)
