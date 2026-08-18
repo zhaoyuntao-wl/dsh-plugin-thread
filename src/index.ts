@@ -267,6 +267,12 @@ export function apply(ctx: Context, config: Config) {
         content: [{ type: 'text', text: card }],
         source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
       }))
+
+      // 轻确认弹窗（§1.5.3d 通道一）：本会话有待确认的决策候选（未提示过）→ 弹窗问用户
+      // 选项：确认（转正）/ 取消（丢弃）/ 推迟（保持 pending 等唤醒）；不阻塞 pre-step（fire-and-forget）
+      if (!s.getSessionIsolation(String(sessionId))) {
+        void promptPendingCandidates(ctx, s, String(sessionId), projectKey)
+      }
     } catch (err) {
       console.error(`thread dsh: injection failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -303,4 +309,72 @@ function publishLatestIsolated(store: ThreadStore, sessionId: string): void {
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+// ─── 轻确认弹窗（§1.5.3d 通道一）───
+// userQuestions 服务类型（dsh 主程序注入，UI 弹窗暂停等用户回答）
+interface UserQuestionServiceLike {
+  ask(request: {
+    questions: Array<{
+      id: string
+      question: string
+      detail?: string
+      header?: string
+      options?: Array<{ label: string; description?: string }>
+    }>
+  }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
+}
+
+// 弹窗待确认的决策候选（仅未提示过的，避免每轮弹）；fire-and-forget，不阻塞 pre-step
+async function promptPendingCandidates(
+  ctx: { userQuestions?: UserQuestionServiceLike; get?: (name: string) => unknown },
+  store: ThreadStore,
+  sessionId: string,
+  projectKey?: string,
+): Promise<void> {
+  try {
+    const uq = ctx.userQuestions ?? (ctx.get?.('userQuestions') as UserQuestionServiceLike | undefined)
+    if (!uq) return // dsh 无 UI 环境（headless）→ 走状态卡计数通道
+    const candidates = store.listPendingCandidates({ sessionId, projectKey }).filter((c) => c.kind === 'decision' && c.prompt_count === 0)
+    if (candidates.length === 0) return
+    const c = candidates[0]
+    store.markCandidatePrompted(c.id)
+    const answer = await uq.ask({
+      questions: [{
+        id: `pending-${c.id}`,
+        header: 'Thread 轻确认',
+        question: `我注意到你可能定了这条决策，确认吗？`,
+        detail: c.text,
+        options: [
+          { label: '确认', description: '转为正式决策' },
+          { label: '取消', description: '丢弃这条候选' },
+          { label: '推迟', description: '暂不处理，之后可再确认' },
+        ],
+      }],
+    })
+    const selected = answer.answers[0]?.selected?.[0]
+    handlePendingAnswer(store, sessionId, c.id, selected ?? '', { projectKey })
+  } catch {
+    // 弹窗失败降级（用户环境无 UI 或无应答），候选保持 pending，走状态卡计数通道
+  }
+}
+
+// 弹窗选项处理（导出便于单测）：确认 → 转正 active；取消 → 丢弃；推迟/未知 → 保持 pending
+export function handlePendingAnswer(
+  store: ThreadStore,
+  sessionId: string,
+  candidateId: number,
+  selected: string,
+  opts: { projectKey?: string } = {},
+): void {
+  if (selected === '确认') {
+    const confirmed = store.confirmCandidate(candidateId)
+    if (confirmed) {
+      store.proposeDecision(sessionId, confirmed.text, { projectKey: opts.projectKey })
+      store.confirmLatestProposed(sessionId)
+    }
+  } else if (selected === '取消') {
+    store.ignoreCandidate(candidateId)
+  }
+  // '推迟' 与未知选项：保持 pending（prompt_count 已 +1，后续靠唤醒/超时）
 }
