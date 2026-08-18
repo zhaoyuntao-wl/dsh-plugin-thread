@@ -20,6 +20,15 @@ dsh plugin add dsh-thread
 
 零配置：`@thread-memory/core` + `better-sqlite3` 依赖随包解决；插件激活即开始采集与注入。
 
+> **注意（原生模块）**：若插件启动报 "Could not locate the bindings file"，是 pnpm 10 安装时忽略了 `better-sqlite3` 的构建脚本所致。在 profile 目录执行一条命令即可修复：
+>
+> ```sh
+> cd ~/.dsh/profiles/<你的 profile>
+> pnpm rebuild better-sqlite3
+> ```
+>
+> 这是 pnpm 10 的 `onlyBuiltDependencies` 策略，非插件缺陷。
+
 ## 启用（profile）
 
 dsh 所有插件都要在 profile 的 `bundles` 里引用才生效。在 `~/.dsh/profiles/<你的 profile>/package.json`：

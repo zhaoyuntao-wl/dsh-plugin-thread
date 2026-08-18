@@ -31,6 +31,17 @@ dsh plugin add dsh-thread
 Zero configuration: `@thread-memory/core` + `better-sqlite3` resolve as dependencies;
 capture and injection start as soon as the plugin is activated.
 
+> **Note (native module)**: if the plugin fails to start with
+> "Could not locate the bindings file", pnpm 10 ignored the `better-sqlite3`
+> build script during install. Fix with one command in the profile directory:
+>
+> ```sh
+> cd ~/.dsh/profiles/<your-profile>
+> pnpm rebuild better-sqlite3
+> ```
+>
+> This is a pnpm 10 `onlyBuiltDependencies` policy, not a plugin bug.
+
 ## Enable (profile)
 
 All dsh plugins must be referenced in a profile's `bundles` to take effect. In
