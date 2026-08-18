@@ -59,6 +59,17 @@ export function isOwnInjection(messages: readonly unknown[]): boolean {
   })
 }
 
+// dsh 压缩 checkpoint 摘要来源标记（官方 @deepseek-ai/dsh-compaction checkpoint 契约：
+// COMPACT_CHECKPOINT_MARKER = { kind: 'plugin', plugin: 'compact' }，跨包钉死，renaming 即编译错）
+const COMPACT_CHECKPOINT_SOURCE_PLUGIN = 'compact'
+
+// 识别 dsh 压缩 checkpoint 摘要消息（source.plugin === 'compact'，官方 @deepseek-ai/dsh-compaction 契约）。
+// 该消息是压缩事务内 append 的 user/message（摘要正文），Thread 侧已由 compaction/summary → compact_checkpoint
+// 落库摘要全文，此处跳过可避免重复采集 + 避免摘要被 applyAnalysis 当用户话语分析（2026-08-18 修复）。
+export function isCompactCheckpointSource(source: { kind?: string; plugin?: string } | undefined): boolean {
+  return source?.kind === 'plugin' && source?.plugin === COMPACT_CHECKPOINT_SOURCE_PLUGIN
+}
+
 // 会话指令识别：整条消息 trim 后精确匹配白名单（隔离 ⑦定案 + 反馈治理恢复通道）
 const ISOLATE_RE = /^(?:\/isolate|[/／]isolate|隔离|开始隔离|进入隔离|临时隔离|静默|免打扰|别打扰)$/
 const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate|解除隔离|退出隔离|恢复共享)$/
@@ -70,6 +81,16 @@ interface IsolationCommand {
   action: 'isolate' | 'unisolate' | 'publish' | 'feedback-del'
   kind?: 'goal' | 'decision' | 'feedback'
   id?: number
+}
+
+// dsh compaction/summary 事件 payload（官方 dsh-compaction-basic commitCompactionBody 契约，
+// SessionEventMap 未展开该类型，插件侧按运行时形状声明）
+interface CompactionSummaryData {
+  compactionId: string
+  sourceCommandId?: string
+  summary: string
+  provider?: string
+  model?: string
 }
 
 function tableForKind(kind: 'goal' | 'decision' | 'feedback'): 'goals' | 'decisions' | 'feedback' {
@@ -151,18 +172,31 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     try {
       const s = openStore()
+      const sessionId = String(session.id)
+      // 压缩边界 → compact_checkpoint（§1.5 情境 C：post-compact 判定依赖此事件）。
+      // dsh 压缩事务事件顺序 = compaction/start → compaction/summary → user/message(checkpoint 摘要) → compaction/end；
+      // 此前四类全落 default 分支被丢弃 → post-compact 情境在 dsh 上从未触发（2026-08-18 修复）。
+      // SessionEventMap 未展开 compaction/* 类型，先 cast 宽类型做字符串比较（TS2367 规避）。
+      const eventType = (event as unknown as { type: string }).type
+      if (eventType === 'compaction/summary') {
+        handleCompactionSummary(s, sessionId, event as unknown as { time: number; data: CompactionSummaryData }, {
+          projectKey,
+          isolation: s.getSessionIsolation(sessionId),
+        })
+        return
+      }
       switch (event.type) {
         case 'user/message': {
           const source = event.data.source
-          // 跳过 Thread 自身的注入（状态卡正文不回流事件流，防自我循环）
-          if (source.kind === 'plugin' && source.plugin === PLUGIN_NAME) {
+          // 跳过 Thread 自身的注入（状态卡正文不回流事件流，防自我循环）+ dsh 压缩 checkpoint 摘要
+          //（摘要已由 compaction/summary → compact_checkpoint 落库，见 isCompactCheckpointSource）
+          if (source.kind === 'plugin' && (source.plugin === PLUGIN_NAME || isCompactCheckpointSource(source))) {
             return
           }
           const body = extractText(event.data.content)
           if (!body) {
             return
           }
-          const sessionId = String(session.id)
           const cmd = parseIsolationCommand(body)
           if (cmd?.action === 'isolate') {
             s.setSessionIsolation(sessionId, true)
@@ -199,7 +233,6 @@ export function apply(ctx: Context, config: Config) {
           if (!body) {
             return
           }
-          const sessionId = String(session.id)
           appendWithRetry(s, {
             session_id: sessionId,
             kind: 'assistant_message',
@@ -377,4 +410,36 @@ export function handlePendingAnswer(
     store.ignoreCandidate(candidateId)
   }
   // '推迟' 与未知选项：保持 pending（prompt_count 已 +1，后续靠唤醒/超时）
+}
+
+// 压缩边界落库（导出便于单测）：dsh compaction/summary → compact_checkpoint。
+// post-compact 情境判定（detectSituation）依赖本会话最近事件含 compact_checkpoint，
+// 此事件此前缺失导致该情境在 dsh 上从未触发（2026-08-18 修复）。
+export function handleCompactionSummary(
+  store: ThreadStore,
+  sessionId: string,
+  event: { time: number; data: CompactionSummaryData },
+  opts: { projectKey?: string; isolation?: boolean } = {},
+): void {
+  const { summary, compactionId } = event.data
+  if (!summary || !compactionId) {
+    // 契约防御：缺摘要/缺事务 id 不落库（压缩事务异常时不产生 checkpoint 标记）
+    return
+  }
+  appendWithRetry(store, {
+    session_id: sessionId,
+    kind: 'compact_checkpoint',
+    ts: iso(event.time),
+    body: summary,
+    meta: {
+      trigger: event.data.sourceCommandId !== undefined ? 'manual' : 'auto',
+      model: event.data.model,
+      provider: event.data.provider,
+      compactionId,
+    },
+  }, {
+    projectKey: opts.projectKey,
+    origin: `dsh://compaction#${compactionId}`,
+    isolation: opts.isolation,
+  }, 20, 100)
 }
