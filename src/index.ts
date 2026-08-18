@@ -12,6 +12,7 @@ import {
   buildStatusCard,
   defaultPaths,
   deriveProjectKey,
+  detectSituation,
   matchToolFeedback,
 } from '@thread-memory/core'
 import { mkdirSync } from 'node:fs'
@@ -258,6 +259,8 @@ export function apply(ctx: Context, config: Config) {
             budgetLines,
             isolated: s.getSessionIsolation(String(sessionId)),
             firstTurn: turn === 1,
+            // 情境判定（§1.5 P0 C+A）：new-session=首轮有历史 → 续接块；post-compact=刚压缩 → 回归块
+            situation: detectSituation(s, { sessionId: String(sessionId), turn, projectKey }),
           })
         : '[Thread 会话记忆状态卡]'
       payload.agent.inject(createUserMessage({
