@@ -11,6 +11,12 @@ dsh as a one-package closed loop:
   databases.
 - **Status-card injection**: injects a per-turn status card via `agent/pre-step`
   — goals, active decisions, and feedback stay resident with O(1) bounded context.
+- **Situational relay**: the card is a situational router — new sessions auto-continue
+  from prior work, compaction boundaries re-anchor goals, and recent decisions are
+  relayed so the model never acts on stale state.
+- **Decision confirmation dialog**: user decision statements are staged as
+  candidates; a dialog (`确认 / 取消 / 推迟`) lets the user confirm, cancel, or
+  postpone — nothing unconfirmed becomes a formal decision.
 - **Embedded MCP server**: `query_session_memory` retrieval (semantic BM25 +
   structured queries) via the `dsh-thread` binary, mountable as a zero-code MCP
   overlay.
