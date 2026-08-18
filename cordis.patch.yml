@@ -2,3 +2,4 @@
 - insert:
     - id: dsh-thread
       name: 'dsh-thread'
+      config: {}
