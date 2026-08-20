@@ -4,24 +4,37 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 // dsh-tools 声明合并 ctx.tools: ToolRuntime（官方类型，guard 签名与 Context 注入一致）
-import type {} from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, type ContentBlock, type ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import {
   ThreadStore,
   applyAnalysis,
   buildStatusCard,
+  classifyReportEvent,
+  classifyWriteEvent,
   defaultPaths,
   deriveProjectKey,
   detectSituation,
+  extractTitleFromContent,
+  getStateDelta,
   matchToolFeedback,
+  parseToolArgs,
+  renderStateDelta,
+  runQueryTool,
+  sedimentClosingTodos,
+  THREAD_BEHAVIOR_CONTRACT,
+  THREAD_NORTH_STAR,
 } from '@thread-memory/core'
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
+import { runBatch0Probes } from './batch0-probe.js'
 
 export const name = 'dsh-thread'
 
-export const inject = ['tools']
+// 批 0 探针模式 / 批 4 主动压缩增强层：inject 声明依赖 compaction（服务可用性驱动加载拉活惰性服务；
+// tokenMeter 由其传递依赖拉起）。正常会话不依赖 compaction（压缩治理走订阅 + 重锚定）。
+export const inject = process.env.THREAD_B0_PROBE === '1' || process.env.THREAD_AUTO_COMPACT === '1' ? ['tools', 'compaction'] : ['tools']
 
 const PLUGIN_NAME = name
 
@@ -32,6 +45,8 @@ export const Config = z.object({
   feedbackRows: z.number().int().positive().default(50),
   busyRetries: z.number().int().positive().default(20),
   busyRetryDelayMs: z.number().int().positive().default(100),
+  // 批 4 增强层（可选，默认关）：回合边界主动压缩的 token 压力阈值（0=关；需 THREAD_AUTO_COMPACT=1 拉活服务）
+  compactPressureTokens: z.number().int().nonnegative().default(Number(process.env.THREAD_AUTO_COMPACT_TOKENS ?? 0)),
 })
 export type Config = z.infer<typeof Config>
 
@@ -76,6 +91,13 @@ const UNISOLATE_RE = /^(?:\/unisolate|[/／]unisolate|解除隔离|退出隔离|
 const PUBLISH_CMD_RE = /^\/thread-publish\s+(goal|decision|feedback)\s+(\d+)$/
 const PUBLISH_NL_RE = /^把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目标|偏好)(?:共享|公开|同步)(?:出去|给项目)?$/
 const FEEDBACK_DEL_RE = /^\/feedback-del\s+(\d+)$/
+const ASSET_CMD_RE = /^\/thread-asset\s+(\S+)(?:\s+--topic\s+(\S+))?$/
+// 收尾词白名单（1.2 收尾自动沉淀触发，整条消息精确匹配，防讨论性语句误触发）
+const CLOSING_WORD_RE = /^(?:先收了|先收|收工了|收工|今天到这|明天继续|歇了|歇|先记|暂时这样)$/
+// /thread-pending 命令（1.3 假承诺兑现）
+const PENDING_LIST_RE = /^\/thread-pending$/
+const PENDING_CMD_RE = /^\/thread-pending\s+(confirm|cancel|defer)\s+(\d+)$/
+const PENDING_CANCEL_ALL_RE = /^\/thread-pending\s+cancel-all$/
 
 interface IsolationCommand {
   action: 'isolate' | 'unisolate' | 'publish' | 'feedback-del'
@@ -120,11 +142,103 @@ export function parseIsolationCommand(body: string): IsolationCommand | undefine
   return undefined
 }
 
+// /thread-asset <path> [--topic <t>]：显式登记产出（0.2 显式登记入口，第一版只做命令）
+export function parseAssetCommand(body: string): { path: string; topic?: string } | undefined {
+  const text = body.trim()
+  const m = text.match(ASSET_CMD_RE)
+  if (!m) {
+    return undefined
+  }
+  return m[2] ? { path: m[1], topic: m[2] } : { path: m[1] }
+}
+
+// /thread-pending 命令（1.3）：list | confirm <id> | cancel <id> | defer <id> | cancel-all
+export interface PendingCommand {
+  action: 'list' | 'confirm' | 'cancel' | 'defer' | 'cancel-all'
+  id?: number
+}
+
+export function parsePendingCommand(body: string): PendingCommand | undefined {
+  const text = body.trim()
+  if (PENDING_LIST_RE.test(text)) {
+    return { action: 'list' }
+  }
+  if (PENDING_CANCEL_ALL_RE.test(text)) {
+    return { action: 'cancel-all' }
+  }
+  const m = text.match(PENDING_CMD_RE)
+  if (m) {
+    return { action: m[1] as 'confirm' | 'cancel' | 'defer', id: Number(m[2]) }
+  }
+  return undefined
+}
+
+export function isClosingWord(body: string): boolean {
+  return CLOSING_WORD_RE.test(body.trim())
+}
+
+// /thread-pending 执行（1.3）：list/confirm/cancel/defer/cancel-all + 回执文本（经 respond 注入）
+export function handlePendingCommand(
+  store: ThreadStore,
+  sessionId: string,
+  cmd: PendingCommand,
+  projectKey: string | undefined,
+  respond: (text: string) => void,
+): void {
+  if (cmd.action === 'list') {
+    const candidates = store.listPendingCandidates(projectKey ? { sessionId, projectKey } : { sessionId })
+    if (candidates.length === 0) {
+      respond('[Thread 待确认候选] 当前无待确认候选。')
+      return
+    }
+    const lines = candidates.map((c) => `  #${c.id} [${c.kind === 'decision' ? '决策' : '偏好'}] ${c.text}`)
+    respond(`[Thread 待确认候选]\n${lines.join('\n')}\n操作：/thread-pending confirm <id> 确认 | cancel <id> 取消 | defer <id> 推迟 | cancel-all 全弃`)
+    return
+  }
+  if (cmd.action === 'confirm') {
+    const c = store.confirmCandidate(cmd.id ?? -1)
+    respond(c ? `[Thread] 候选 #${cmd.id} 已确认。` : `[Thread] 候选 #${cmd.id} 不存在或已处理。`)
+    return
+  }
+  if (cmd.action === 'cancel') {
+    const c = store.ignoreCandidate(cmd.id ?? -1)
+    respond(c ? `[Thread] 候选 #${cmd.id} 已取消。` : `[Thread] 候选 #${cmd.id} 不存在或已处理。`)
+    return
+  }
+  if (cmd.action === 'defer') {
+    respond(`[Thread] 候选 #${cmd.id} 保持待确认（推迟）。`)
+    return
+  }
+  const count = store.ignoreAllPendingCandidates(projectKey ? { sessionId, projectKey } : { sessionId })
+  respond(`[Thread] 已丢弃 ${count} 条待确认候选。`)
+}
+
+// tool/call meta 构建（自检修正⑦：dsh 侧缺 file_path 的采集修复）——
+// 从 arguments（JSON 字符串）解析 file_path 存 meta，产出识别依赖它
+export function buildToolCallMeta(name: string, callId: string, argumentsRaw: string): Record<string, unknown> {
+  const meta: Record<string, unknown> = { tool_name: name, call_id: callId }
+  const parsed = parseToolArgs(argumentsRaw)
+  const filePath = typeof parsed?.file_path === "string" ? parsed.file_path : undefined
+  if (filePath) {
+    meta.file_path = filePath
+  }
+  return meta
+}
+
 export function apply(ctx: Context, config: Config) {
+  // MAX v3 批 0 探针（env 门控，spike 专用；正常会话 THREAD_B0_PROBE 未设 = 零行为差异）
+  if (process.env.THREAD_B0_PROBE === '1') {
+    runBatch0Probes(ctx, {
+      fixturePath: process.env.THREAD_B0_FIXTURE ?? 'C:/Users/tony/.thread-b0/batch0.jsonl',
+      compact: process.env.THREAD_B0_COMPACT === '1',
+      followup: process.env.THREAD_B0_FOLLOWUP === '1',
+    })
+  }
   const budgetLines = config.budgetLines ?? 200
   const feedbackRows = config.feedbackRows ?? 50
   const busyRetries = config.busyRetries ?? 20
   const busyRetryDelayMs = config.busyRetryDelayMs ?? 100
+  const compactPressureTokens = config.compactPressureTokens ?? 0
   const cwd = process.env.THREAD_CWD ?? process.cwd()
   const projectKey = deriveProjectKey(cwd)
   const paths = defaultPaths(cwd)
@@ -139,6 +253,91 @@ export function apply(ctx: Context, config: Config) {
     }
     store = new ThreadStore({ eventsPath: paths.eventsDbPath, structuredPath: paths.structuredDbPath, projectKey })
     return store
+  }
+
+  // 代理注册表：事件驱动的响应注入（/thread-pending 回执）经 agents.get(sessionId).inject
+  interface AgentsRegistryLike {
+    get(id: string | number): { inject(message: unknown): void; whenIdle(): Promise<void> } | undefined
+  }
+  const agents = ctx.get?.('agents') as AgentsRegistryLike | undefined
+
+  // 收尾沉淀状态（1.2）：turn 内出现过收尾词 → turn/end 沉淀一次
+  let turnClosingWord = false
+  let turnClosingSession = ''
+  // 主动压缩节流（3.2 增强层）：每回合最多尝试一次
+  let turnCompactAttempted = false
+
+  // 事件驱动注入统一入口（批 0 实测约束 #2：session/event 分发内同步 inject 必被 append 重入拒绝）
+  function injectFromEvent(sessionId: string, text: string): void {
+    queueMicrotask(() => {
+      try {
+        const agent = agents?.get(sessionId)
+        agent?.inject(createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+        }))
+      } catch (err) {
+        console.error(`thread dsh: event inject failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })
+  }
+
+  // G3 原生工具注册（max 2.5）：query_session_memory 经 ctx.tools.register 进模型 tools 参数区。
+  // 与 MCP overlay 共用 core runQueryTool（防两处漂移）；MCP 通道保留（多底座适配器 + 回退）。
+  const disposeQueryTool = ctx.tools.register(defineTool({
+    name: 'query_session_memory',
+    description: '查询会话记忆：事件流水与结构化表（目标/决策/反馈）的按需检索，支持导航原语（ls/cd/cat/grep）。需要历史细节、上下文或不确定时调用，不要编造；未找到时返回 not-found 标记。',
+    parameters: {
+      query: { type: 'string', description: '检索查询（grep 导航时为其关键词），如 "登录方案 决策"' },
+      nav: { type: 'string', enum: ['ls', 'cd', 'cat', 'grep'], description: '导航指令：ls 列子项（会话产出/待办或产出关联）| cd 节点详情 | cat 全文 | grep 检索带关联上下文' },
+      target: { type: 'string', description: '导航目标（会话 id / asset id / 文档路径）' },
+      limit: { type: 'integer', description: '最大返回片段数' },
+      session_id: { type: 'string', description: '会话 ID；缺省使用最近活跃会话' },
+      kind: { type: 'string', enum: ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'compact_checkpoint', 'goal', 'decision', 'feedback'], description: '按类型过滤：事件类或结构化表类 goal/decision/feedback' },
+      since: { type: 'string', description: '时间下界 ISO（精确查询路径）' },
+      until: { type: 'string', description: '时间上界 ISO（精确查询路径）' },
+      order: { type: 'string', enum: ['asc', 'desc'], description: '排序方向，默认 desc' },
+      count_only: { type: 'boolean', description: '只返回计数' },
+      token_budget: { type: 'integer', description: '返回结果 token 预算' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    execute: async (args) => {
+      const result = runQueryTool(openStore(), {
+        query: args.query,
+        nav: args.nav,
+        target: args.target,
+        limit: args.limit,
+        session_id: args.session_id,
+        kind: args.kind,
+        since: args.since,
+        until: args.until,
+        order: args.order,
+        count_only: args.count_only,
+        token_budget: args.token_budget,
+      })
+      return result.text
+    },
+  }))
+  ctx.effect(() => () => disposeQueryTool())
+
+  // ② 动态 SKILL（max 2.1，G2 双保险之一）：注册进 <available_skills> 目录（模型可经 skill 工具加载）；
+  // 正文 = core behavior-contract 常量（与首轮锚定注入单一来源）；锚点注入 = 双保险之二（批 2 已实现）
+  const skills = ctx.get?.('skills') as { register(skill: { name: string; description: string; source: string; content: string }): () => void } | undefined
+  if (skills) {
+    try {
+      const disposeSkill = skills.register({
+        name: 'thread',
+        description: 'Thread 会话记忆行为契约：何时查记忆（需要细节就调 query_session_memory）、收尾沉淀纪律、状态卡轮次纪律。',
+        source: 'runtime',
+        content: THREAD_BEHAVIOR_CONTRACT,
+      })
+      ctx.effect(() => () => disposeSkill())
+    } catch (err) {
+      console.error(`thread dsh: skill registration failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）。
@@ -178,11 +377,76 @@ export function apply(ctx: Context, config: Config) {
       // 此前四类全落 default 分支被丢弃 → post-compact 情境在 dsh 上从未触发（2026-08-18 修复）。
       // SessionEventMap 未展开 compaction/* 类型，先 cast 宽类型做字符串比较（TS2367 规避）。
       const eventType = (event as unknown as { type: string }).type
+      if (eventType === 'turn/start') {
+        // 收尾沉淀 + 主动压缩节流按回合复位（1.2 / 3.2）：每 turn 独立判定
+        turnClosingWord = false
+        turnClosingSession = sessionId
+        turnCompactAttempted = false
+      }
+      if (eventType === 'turn/end' && turnClosingWord && turnClosingSession === sessionId) {
+        // 收尾自动沉淀（1.2）：进行中目标 → todos + pending 候选归集；幂等（basis 去重）防重复
+        try {
+          const result = sedimentClosingTodos(s, sessionId, {
+            projectKey,
+            isolation: s.getSessionIsolation(sessionId),
+          })
+          if (result.goalTodosCreated > 0 || result.pendingTodoCreated) {
+            injectFromEvent(sessionId, `[Thread 收尾沉淀] 进行中目标 ${result.goalTodosCreated} 条 → 待办；待确认候选归集 ${result.pendingTodoCreated ? '1' : '0'} 条。`)
+          }
+        } catch (err) {
+          console.error(`thread dsh: closing sediment failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        turnClosingWord = false
+      }
+      if (eventType === 'turn/end' && compactPressureTokens > 0 && !turnCompactAttempted) {
+        // 3.2 主动压缩（dsh 增强层，可选）：回合边界 tokenMeter 监控 + compactNow 静默触发。
+        // 批 0 实测约束：compactNow 内部自带 runMaintenance（直调，勿再包）；busy/取消降级只记日志。
+        turnCompactAttempted = true
+        try {
+          const compaction = ctx.get?.('compaction', true) as { compactNow(agent: unknown, signal: AbortSignal): Promise<{ compactionId?: string } | null> } | undefined
+          const meter = ctx.get?.('tokenMeter', true) as { measure(s: unknown): { totalTokens?: number } } | undefined
+          const agent = agents?.get(sessionId)
+          if (!compaction || !meter || !agent) {
+            console.error(`thread dsh: auto-compact unavailable (compaction=${!!compaction} meter=${!!meter} agent=${!!agent})`)
+          } else {
+            const m = meter.measure(session)
+            if ((m.totalTokens ?? 0) >= compactPressureTokens) {
+              void (async () => {
+                try {
+                  await agent.whenIdle()
+                  const result = await compaction.compactNow(agent, AbortSignal.timeout(120000))
+                  if (result) {
+                    injectFromEvent(sessionId, '[Thread] 上下文压缩完成（主动触发）。')
+                  }
+                } catch (err) {
+                  console.error(`thread dsh: auto-compact failed: ${err instanceof Error ? err.message : String(err)}`)
+                }
+              })()
+            }
+          }
+        } catch (err) {
+          console.error(`thread dsh: auto-compact check failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
       if (eventType === 'compaction/summary') {
         handleCompactionSummary(s, sessionId, event as unknown as { time: number; data: CompactionSummaryData }, {
           projectKey,
           isolation: s.getSessionIsolation(sessionId),
         })
+        // 3.1 压缩后重锚定（core 不变量）：事件驱动注入重锚定组合包（post-compact 卡 + skill 正文）。
+        // inject 不唤醒 driver——安静等下一轮；injectFromEvent 内部 queueMicrotask 防 append 重入（批 0 约束 #2）
+        try {
+          const reanchorCard = buildStatusCard(s, {
+            sessionId,
+            projectKey,
+            budgetLines,
+            isolated: s.getSessionIsolation(sessionId),
+            situation: 'post-compact',
+          })
+          injectFromEvent(sessionId, `[Thread 压缩后重锚定]\n${THREAD_BEHAVIOR_CONTRACT}\n\n${reanchorCard}`)
+        } catch (err) {
+          console.error(`thread dsh: re-anchor failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
         return
       }
       switch (event.type) {
@@ -226,6 +490,33 @@ export function apply(ctx: Context, config: Config) {
             origin: `dsh://msg#${event.data.id}`,
             isolation: after,
           })
+          // /thread-asset <path> [--topic <t>] 显式登记（0.2 显式登记入口）：source_event = 命令消息
+          const assetCmd = parseAssetCommand(body)
+          if (assetCmd) {
+            try {
+              withBusyRetry(() => s.registerAsset({
+                sessionId,
+                path: assetCmd.path,
+                title: readAssetTitle(assetCmd.path, cwd),
+                topic: assetCmd.topic,
+                sourceEvent: appended.id,
+                projectKey,
+                isolation: after,
+              }), busyRetries, busyRetryDelayMs)
+            } catch (err) {
+              console.error(`thread dsh: explicit asset registration failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
+          // 收尾词标记（1.2）：turn/end 时沉淀
+          if (isClosingWord(body)) {
+            turnClosingWord = true
+            turnClosingSession = sessionId
+          }
+          // /thread-pending 命令（1.3）：回执经事件驱动注入（queueMicrotask 防 append 重入）
+          const pendingCmd = parsePendingCommand(body)
+          if (pendingCmd) {
+            handlePendingCommand(s, sessionId, pendingCmd, projectKey, (text) => injectFromEvent(sessionId, text))
+          }
           break
         }
         case 'assistant/message': {
@@ -242,13 +533,31 @@ export function apply(ctx: Context, config: Config) {
           break
         }
         case 'tool/call': {
-          appendWithRetry(s, {
+          const argumentsRaw = event.data.arguments
+          const appended = appendWithRetry(s, {
             session_id: String(session.id),
             kind: 'tool_call',
             ts: iso(event.time),
-            body: `${event.data.name} 调用参数：${event.data.arguments.slice(0, 2000)}`,
-            meta: { tool_name: event.data.name, call_id: event.data.callId },
+            body: `${event.data.name} 调用参数：${String(argumentsRaw).slice(0, 2000)}`,
+            meta: buildToolCallMeta(event.data.name, event.data.callId, argumentsRaw),
           }, { projectKey, origin: `dsh://tool#${event.data.callId}` }, busyRetries, busyRetryDelayMs)
+          // 产出识别（0.2）：文档/报告产出 → knowledge_assets 登记 + produces/references 写时建边。
+          // 失败降级：登记异常只记日志不阻塞采集主路径（旁路可失败原则）
+          const classification = classifyWriteEvent(event.data.name, argumentsRaw) ?? classifyReportEvent(event.data.name, argumentsRaw, event.data.callId)
+          if (classification) {
+            try {
+              withBusyRetry(() => s.registerAsset({
+                sessionId: String(session.id),
+                path: classification.path,
+                title: classification.title,
+                sourceEvent: appended.id,
+                projectKey,
+                isolation: s.getSessionIsolation(String(session.id)),
+              }), busyRetries, busyRetryDelayMs)
+            } catch (err) {
+              console.error(`thread dsh: asset registration failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
           break
         }
         case 'tool/result': {
@@ -285,21 +594,56 @@ export function apply(ctx: Context, config: Config) {
     try {
       const s = openStore()
       const sessionId = payload.agent.session?.id ?? ''
-      const card = sessionId
-        ? buildStatusCard(s, {
-            sessionId: String(sessionId),
-            projectKey,
-            budgetLines,
-            isolated: s.getSessionIsolation(String(sessionId)),
-            firstTurn: turn === 1,
-            // 情境判定（§1.5 P0 C+A）：new-session=首轮有历史 → 续接块；post-compact=刚压缩 → 回归块
-            situation: detectSituation(s, { sessionId: String(sessionId), turn, projectKey }),
-          })
-        : '[Thread 会话记忆状态卡]'
-      payload.agent.inject(createUserMessage({
-        content: [{ type: 'text', text: card }],
-        source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
-      }))
+      // G5 跨会话 delta（2.3.2）：回合边界水位判定，他代理有新决策/目标/偏好/候选变更才注入
+      if (sessionId && !s.getSessionIsolation(String(sessionId))) {
+        try {
+          const key = `lastDeltaAt:${String(sessionId)}`
+          const since = s.getMeta(key)
+          if (since === undefined) {
+            // 首轮水位初始化：历史状态由首轮锚定 + 接续包承载，不重放全部历史
+            s.setMeta(key, new Date().toISOString())
+          } else {
+            const delta = getStateDelta(s, {
+              projectKey,
+              since,
+              excludeSessionId: String(sessionId),
+              viewerSessionId: String(sessionId),
+            })
+            const deltaText = renderStateDelta(delta)
+            if (deltaText) {
+              payload.agent.inject(createUserMessage({
+                content: [{ type: 'text', text: deltaText }],
+                source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+              }))
+              s.setMeta(key, new Date().toISOString())
+            }
+          }
+        } catch (err) {
+          console.error(`thread dsh: delta failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      // 三触发送达（v3）：锚点 = 首轮（锚定/续接卡）与压缩后（事件驱动重锚定）+ 每回合 G5 delta。
+      // 非首轮不再注入每轮状态卡（G4 交换：模型忘状态 → skill 教"需要细节就调工具查" + delta/重锚定兜底）
+      if (turn === 1 && sessionId) {
+        const card = buildStatusCard(s, {
+          sessionId: String(sessionId),
+          projectKey,
+          budgetLines,
+          isolated: s.getSessionIsolation(String(sessionId)),
+          firstTurn: true,
+          // 情境判定（§1.5 P0 C+A）：new-session=首轮有历史 → 续接块
+          situation: detectSituation(s, { sessionId: String(sessionId), turn, projectKey }),
+        })
+        // 首轮锚定组合包（1.1）：全新会话（turn===1 且本会话无事件）→ init 锚定 + 行为契约正文 + 状态卡
+        const isFreshSession = s.getRecentEvents(String(sessionId), 1).length === 0
+        const text = isFreshSession
+          ? `[Thread 首轮锚定]\n项目: ${projectKey}\n${THREAD_NORTH_STAR}\n\n${THREAD_BEHAVIOR_CONTRACT}\n\n${card}`
+          : card
+        payload.agent.inject(createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+        }))
+      }
 
       // 轻确认弹窗（§1.5.3d 通道一）：本会话有待确认的决策候选（未提示过）→ 弹窗问用户
       // 选项：确认（转正）/ 取消（丢弃）/ 推迟（保持 pending 等唤醒）；不阻塞 pre-step（fire-and-forget）
@@ -342,6 +686,32 @@ function publishLatestIsolated(store: ThreadStore, sessionId: string): void {
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+// SQLITE_BUSY 重试泛化（registerAsset 等结构化写同事件采集共用重试语义）
+function withBusyRetry<T>(fn: () => T, retries: number, retryDelayMs: number, tries = 0): T {
+  try {
+    return fn()
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'SQLITE_BUSY' || String(err).includes('database is locked')) {
+      if (tries < retries) {
+        sleepSync(retryDelayMs)
+        return withBusyRetry(fn, retries, retryDelayMs, tries + 1)
+      }
+    }
+    throw err
+  }
+}
+
+// /thread-asset 标题：读文件首行 # 标题，不可读兜底 basename（显式登记不因文件不可读而失败）
+function readAssetTitle(path: string, cwd: string): string {
+  const resolved = isAbsolute(path) ? path : join(cwd, path)
+  try {
+    const content = readFileSync(resolved, 'utf8').slice(0, 800)
+    return extractTitleFromContent(content, path)
+  } catch {
+    return extractTitleFromContent(undefined, path)
+  }
 }
 
 // ─── 轻确认弹窗（§1.5.3d 通道一）───

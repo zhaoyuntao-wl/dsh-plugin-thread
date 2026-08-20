@@ -29,3 +29,6 @@ Thumbs.db
 
 # Internal development docs (kept locally, excluded from public repo)
 docs/local/
+
+# batch-0 probe fixtures (spike artifacts)
+.batch0/
