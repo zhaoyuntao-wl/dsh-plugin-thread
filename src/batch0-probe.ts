@@ -5,6 +5,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { ThreadStore, defaultPaths, deriveProjectKey } from '@thread-memory/core'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
@@ -36,6 +37,7 @@ export interface Batch0ProbeEnv {
   fixturePath: string
   compact: boolean
   followup: boolean
+  deltaDrill: boolean
 }
 
 export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
@@ -125,6 +127,7 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
   // ③ compactNow/compactRegion 已多轮实测完毕（见 spike 报告），后续轮次不再触发压缩
   const compactionTriggered = false
   let markerInjected = false
+  let drillFired = false
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     try {
       const eventType = (event as unknown as { type: string }).type
@@ -169,6 +172,9 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
         if (body.includes(B0_MARKER_PREFIX)) {
           log('06-marker-landed', { body: body.slice(0, 200) })
         }
+        if (body.startsWith('[Thread 状态更新（来自其他会话）]')) {
+          log('07-delta-injected', { body: body.slice(0, 300) })
+        }
       }
       if (eventType === 'assistant/message') {
         const body = (event as { data: { message: { content: Array<{ type: string; text?: string }> } } }).data.message.content
@@ -196,6 +202,30 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
           }
         } catch (err) {
           log('04-token-meter', { ok: false, error: String(err) })
+        }
+      }
+      // ⑦ G5 delta 现网实测（env.deltaDrill）：turn 内（tool/result，driver 活跃期）写入"他代理"决策
+      // → followup 排队第二轮（runner 收尾前可见）→ 第二轮 pre-step 主插件 delta 块应注入 → 模型复述
+      if (eventType === 'tool/result' && env.deltaDrill && !drillFired) {
+        drillFired = true
+        try {
+          const paths = defaultPaths(process.cwd())
+          const drillStore = new ThreadStore({ eventsPath: paths.eventsDbPath, structuredPath: paths.structuredDbPath, projectKey: deriveProjectKey(process.cwd()) })
+          drillStore.proposeDecision('drill-other-agent', 'Thread 发布叙事主打模型工作质量（可靠性向）', { projectKey: deriveProjectKey(process.cwd()) })
+          drillStore.close()
+          log('07-drill', { decisionWritten: true })
+          queueMicrotask(() => {
+            const agent = agents?.get(String(session.id))
+            // 注意：source 不能用 dsh-thread（主插件 isOwnInjection 会把第二轮当纯卡片轮跳过 delta）；
+            // 用独立 tag 让主插件按正常轮处理（delta 块才会跑）——真实双代理场景第二轮即真实用户消息
+            agent?.followup(createUserMessage({
+              content: [{ type: 'text', text: 'drill 提问：你在最近上下文里是否看到以 [Thread 状态更新（来自其他会话）] 开头的增量块？如果看到，原样复述其中决策内容。' }],
+              source: { kind: 'plugin', plugin: 'dsh-thread-b0-drill', form: 'instructions' },
+            }))
+            log('07-drill', { followupQueued: true })
+          })
+        } catch (err) {
+          log('07-drill', { ok: false, error: String(err) })
         }
       }
       // ⑥ 直达测试（不依赖压缩事务）：事件驱动 inject + steer → 下一 step 模型可见性。

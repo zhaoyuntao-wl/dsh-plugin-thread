@@ -232,6 +232,7 @@ export function apply(ctx: Context, config: Config) {
       fixturePath: process.env.THREAD_B0_FIXTURE ?? 'C:/Users/tony/.thread-b0/batch0.jsonl',
       compact: process.env.THREAD_B0_COMPACT === '1',
       followup: process.env.THREAD_B0_FOLLOWUP === '1',
+      deltaDrill: process.env.THREAD_B0_DELTA_DRILL === '1',
     })
   }
   const budgetLines = config.budgetLines ?? 200
