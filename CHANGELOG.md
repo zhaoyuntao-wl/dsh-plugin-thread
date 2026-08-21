@@ -1,5 +1,11 @@
 # dsh-thread
 
+## 1.0.2
+
+### Patch Changes
+
+- docs：新增「支持的 dsh 版本」章节（验证 0.1.1-rc.2 / 兼容策略 / CI compat matrix 更新）
+
 ## 1.0.1
 
 ### Patch Changes
