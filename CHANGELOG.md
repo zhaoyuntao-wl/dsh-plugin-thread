@@ -1,5 +1,11 @@
 # dsh-thread
 
+## 1.0.1
+
+### Patch Changes
+
+- 发布卫生：dist 排除测试产物与 batch0-probe（env 门控探针仅保留在仓库）
+
 ## 1.0.0
 
 ### Major Changes
