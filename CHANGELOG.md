@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- 发布卫生：dist 排除测试产物与 batch0-probe（env 门控探针仅保留在仓库）
+- 发布卫生（构建层修复）：build 改用 tsconfig.build.json 排除测试产物（1.0.1 起 dist 不含任何 *.test.*）；batch0-probe 保留在包内（env 门控 THREAD_B0_PROBE=1，默认零行为，README 已注明）
 
 ## 1.0.0
 

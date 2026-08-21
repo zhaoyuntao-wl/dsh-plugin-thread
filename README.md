@@ -57,6 +57,9 @@ end to end.
 - **Optional active compaction** — with `THREAD_AUTO_COMPACT=1` the plugin
   monitors token pressure at turn boundaries and triggers `compactNow` silently;
   state re-anchors after every compaction either way.
+- **Dev probe, inert by default** — the package ships a `batch0-probe` module
+  used for contract smoke-testing during development; it is inert unless
+  `THREAD_B0_PROBE=1` is set, so normal sessions are unaffected.
 
 ## Install
 

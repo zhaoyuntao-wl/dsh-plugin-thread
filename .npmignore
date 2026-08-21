@@ -1,3 +1,0 @@
-# 发布卫生（2026-08-21）：测试产物与 batch0-probe（env 门控探针，仅仓库保留）不进 npm 包
-**/*.test.*
-dist/batch0-probe.*
