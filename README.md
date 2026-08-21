@@ -1,32 +1,62 @@
-# dsh-plugin-thread
+# dsh-thread
 
 [![CI](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
-brings **Thread** — a base-agnostic session memory layer for coding agents — to
-dsh as a one-package closed loop:
+Thread's **deep-integration** plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) —
+session memory with lineage for coding agents, using the base's native channels
+end to end.
 
-- **Lossless capture**: subscribes to `session/event` and persists the full event
-  stream (user messages, assistant replies, tool calls/results) to dual SQLite
-  databases.
-- **Status-card injection**: injects a per-turn status card via `agent/pre-step`
-  — goals, active decisions, and feedback stay resident with O(1) bounded context.
-- **Situational relay**: the card is a situational router — new sessions auto-continue
-  from prior work, compaction boundaries re-anchor goals, and recent decisions are
-  relayed so the model never acts on stale state.
-- **Decision confirmation dialog**: user decision statements are staged as
-  candidates; a dialog (`确认 / 取消 / 推迟`) lets the user confirm, cancel, or
-  postpone — nothing unconfirmed becomes a formal decision.
-- **Embedded MCP server**: `query_session_memory` retrieval (semantic BM25 +
-  structured queries) via the `dsh-thread` binary, mountable as a zero-code MCP
-  overlay.
+## What it does
 
-Guarantees: decisions never lost, goals never drift, no repeated questions —
-across long tasks, compaction boundaries, and new sessions.
-
-> **Repository relationship**: this is the dsh deep-adapter for
-> [Thread](https://github.com/zhaoyuntao-wl/thread). The general kernel
-> (`@thread-memory/core`) and the thin Qoder adapter live in the main Thread repository.
+- **Lossless capture** — subscribes to `session/event`; the full event stream
+  lands in dual SQLite databases with stable origins (idempotent append).
+- **Structural delivery, three triggers** — a first-turn anchor (project identity
+  + behavior contract + status card), a re-anchor after every compaction, and a
+  cross-agent state delta at every turn boundary. No per-turn card noise.
+- **Native query tool** — `query_session_memory` registered through
+  `ctx.tools.register` into the model's tool schema, with filesystem-style
+  navigation `ls` / `cd` / `cat` / `grep`. The embedded MCP server remains as a
+  fallback channel.
+- **Behavior-contract skill** — a `thread` skill is registered into the base's
+  skill catalog ("need details → call the tool") and injected at anchors, so the
+  model does not rely on memory to know it has memory.
+- **Output recognition** — write/edit tools on markdown documents register
+  `knowledge_assets` with lineage edges on write; `/thread-reg ast` covers
+  explicit registration.
+- **Explicit decision & preference channels** — decisions are recorded through
+  `/thread-reg dec` (user, `--supersedes <id>` for chain evolution) or the
+  model's `record_decision` tool (the behavior contract instructs the model to
+  call it when the user settles a decision or it commits to one). Preferences
+  and lessons are recorded through `/thread-reg fdb` (auto-classified as
+  correction when phrased as "don't"). Natural-language extraction of
+  decisions/preferences is off — zero text-heuristic false positives; the
+  lossless event stream remains the backstop for anything unrecorded. (Goal
+  detection from short imperative messages and completion detection stay on,
+  guarded against pasted/multi-line text.)
+- **Closing sediment + inbox** — closing words sediment in-progress goals into
+  todos; `/thread-cfm` is the single pending-work inbox: todos (`t#id`) and
+  candidates (`c#id`) in one view — `do` completes/promotes (candidates accept a
+  corrected text), `cnl` discards, `cnl all` clears both. The status card
+  surfaces the top candidates so they cannot pile up silently.
+- **Behavior notes (1.0, stated plainly)** — candidates are not produced
+  automatically: natural-language extraction of decisions/preferences is off, so
+  `c#` entries only ever hold pre-existing rows until the post-release
+  extraction layer arrives; todos are produced actively (closing sediment +
+  goal-completion self-healing). Decisions never expire on their own — close
+  out time-bound ones with `--supersedes`. Goal completion detection is
+  conservative (≥4 non-ASCII / ≥8 pure-ASCII overlap; short English goals are
+  missed rather than mis-judged — abandon them with `/thread-rev gol`).
+  See the [Thread README](https://github.com/zhaoyuntao-wl/Thread) "Honest
+  boundaries" section for the full list.
+- **Resource cleanup** — `/thread-rev <ast|dec|fdb|gol> <ids|all>` revokes
+  registrations: decisions/preferences/assets are deleted (the event stream
+  keeps the text), goals are abandoned through the state machine with their
+  todos self-healed.
+- **Session isolation** — `/thread-iso` / `/thread-uniso`, and
+  `/thread-pub <ast|dec|fdb|gol> <ids|all>` shares rows produced while isolated.
+- **Optional active compaction** — with `THREAD_AUTO_COMPACT=1` the plugin
+  monitors token pressure at turn boundaries and triggers `compactNow` silently;
+  state re-anchors after every compaction either way.
 
 ## Install
 
@@ -34,8 +64,28 @@ across long tasks, compaction boundaries, and new sessions.
 dsh plugin add dsh-thread
 ```
 
-Zero configuration: `@thread-memory/core` + `better-sqlite3` resolve as dependencies;
-capture and injection start as soon as the plugin is activated.
+All dsh plugins must be referenced in a profile's `bundles` to take effect. In
+`~/.dsh/profiles/<your-profile>/package.json`:
+
+```json
+{
+  "name": "dsh-profile-my",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-headless",
+        "dsh-thread"
+      ]
+    }
+  }
+}
+```
+
+Zero configuration beyond that: `@thread-memory/core` + `better-sqlite3` resolve
+as dependencies; capture and injection start as soon as the plugin is activated.
 
 > **Note (native module)**: if the plugin fails to start with
 > "Could not locate the bindings file", pnpm 10 ignored the `better-sqlite3`
@@ -48,68 +98,47 @@ capture and injection start as soon as the plugin is activated.
 >
 > This is a pnpm 10 `onlyBuiltDependencies` policy, not a plugin bug.
 
-## Enable (profile)
+## Configuration
 
-All dsh plugins must be referenced in a profile's `bundles` to take effect. In
-`~/.dsh/profiles/<your-profile>/package.json`:
+| Config | Default | Meaning |
+|---|---|---|
+| `budgetLines` | 200 | Status card line budget |
+| `feedbackRows` | 50 | Feedback rows consulted by the tool guard |
+| `busyRetries` / `busyRetryDelayMs` | 20 / 100 | SQLITE_BUSY retry policy |
+| `compactPressureTokens` | 0 | Active-compaction token threshold (0 = off; requires `THREAD_AUTO_COMPACT=1` to pull the compaction service) |
 
-```json
-{
-  "name": "dsh-profile-my",
-  "private": true,
-  "dependencies": {},
-  "dsh": {
-    "profile": {
-      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-thread"]
-    }
-  }
-}
-```
+## Commands
 
-To use `query_session_memory` in-session / in the Web UI, add the MCP overlay in
-the profile's `cordis.patch.yml`:
+Registered as real dsh commands — visible in the command palette, `/`-completable,
+and executed directly (no model round-trip). The same lines also work as plain
+messages where no command UI exists. One grammar, six commands:
 
-```yaml
-- insert:
-    - id: mcp-thread
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: thread
-        transport: stdio
-        command: npx
-        args: ['dsh-thread']
-        failOnStartupError: true
-```
+| Command | Effect |
+|---|---|
+| `/thread-reg <ast\|dec\|fdb\|gol>` | List that resource's rows (ids for rev/supersede) |
+| `/thread-reg <ast\|dec\|fdb\|gol> <text>` | Register: ast = path (directories expand recursively, cap 50) · dec = decision (active immediately; `--supersedes <id>` evolves the chain) · fdb = preference/lesson (auto-classified by "don't" phrasing) · gol = goal |
+| `/thread-rev <ast\|dec\|fdb\|gol>` | List that resource's rows |
+| `/thread-rev <ast\|dec\|fdb\|gol> <ids\|all>` | Revoke: dec/fdb/ast are deleted (event stream keeps the text) · gol is abandoned (state machine + todos self-heal) |
+| `/thread-cfm` | Pending-work inbox: todos (`t#id`) + candidates (`c#id`) |
+| `/thread-cfm do <id> [text]` | `t#` complete a todo · `c#` promote a candidate to an active decision (optional corrected text) |
+| `/thread-cfm cnl <id>` / `cnl all` | Discard one item / clear the inbox |
+| `/thread-iso` / `/thread-uniso` | Silence / restore a session |
+| `/thread-pub` | List isolated rows (all resources, ids for sharing) |
+| `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | Share isolated rows |
 
-## Session isolation
+## MCP fallback
 
-When two agents work in parallel on unrelated tasks in the same project, isolate
-a session with natural language ("隔离/静默/别打扰") or `/isolate` — its dialogue
-context (messages/decisions/feedback) becomes visible only to itself, and the
-status card stops being disturbed by the other agent's updates; tool events stay
-shared (project facts stay continuous). `/unisolate` lifts isolation (history
-stays isolated), and `/thread-publish <goal|decision|feedback> <id>` (or natural
-language "把这个决策共享出去") promotes a row back to shared visibility on demand.
+The package ships an embedded MCP server (`bin: dsh-thread`) exposing the same
+`query_session_memory` contract over MCP for bases and setups where native tool
+registration is unavailable. See the [Thread Memory
+Protocol](https://github.com/zhaoyuntao-wl/Thread/blob/main/docs/design/memory-protocol.md).
 
-## Version pinning
+## Repository relationship
 
-Peer dependencies use `^0.1.0-rc.6` (compatible with the rc.6/rc.7 train);
-adapts to the dsh release train, compat matrix in CI.
-
-## Development
-
-```sh
-pnpm install
-pnpm build
-pnpm typecheck
-pnpm test
-pnpm lint
-```
-
-`@thread-memory/core` is linked via `file:../thread/packages/core` during development
-(CI runs the full chain only once core is published to npm and the dependency
-switches to a version; see `.github/workflows/ci.yml`).
+This repository hosts the dsh deep-integration plugin. The base-agnostic kernel
+(`@thread-memory/core`) and the Qoder adapter live in the main
+[Thread](https://github.com/zhaoyuntao-wl/Thread) repository.
 
 ## License
 
-[MIT](./LICENSE)
+MIT

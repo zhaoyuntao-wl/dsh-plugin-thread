@@ -1,18 +1,23 @@
-# dsh-plugin-thread
+# dsh-thread
 
 [![CI](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaoyuntao-wl/dsh-plugin-thread/actions/workflows/ci.yml)
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的插件，把 **Thread**（底座无关的编码 Agent 会话记忆层）以单包闭环形式接入 dsh：
+Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的**深度集成**插件——
+带血缘的编码 Agent 会话记忆，全程使用底座原生通道。
 
-- **无损采集**：订阅 `session/event`，把完整事件流（用户消息 / Agent 回复 / 工具调用与结果）持久化到双 SQLite 库。
-- **状态卡注入**：经 `agent/pre-step` 每轮注入状态卡——目标、生效决策与偏好常驻，每轮上下文保持 O(1) 有界。
-- **情境化传达**：状态卡为情境路由器——新会话自动续接上次工作、压缩边界重述目标、最近决策自动传达，模型不基于旧状态行动。
-- **决策确认弹窗**：用户口头决策暂存为候选，弹窗（确认/取消/推迟）裁决——未确认的内容绝不成为正式决策。
-- **内嵌 MCP server**：`dsh-thread` 命令提供 `query_session_memory` 检索（语义 BM25 + 结构化查询），可零代码挂载为 MCP overlay。
+## 功能
 
-能力承诺：决策不丢、目标不漂移、不重复提问——跨长任务、跨压缩边界、跨新会话。
-
-> **仓库关系**：本仓库是 [Thread](https://github.com/zhaoyuntao-wl/thread) 的 dsh 深度接入适配器；通用内核（`@thread-memory/core`）与薄接入的 Qoder 适配器在 Thread 主仓库。
+- **无损采集**——订阅 `session/event`，完整事件流水落双 SQLite 库，稳定 origin 幂等去重。
+- **三触发结构性送达**——首轮锚定（项目身份 + 行为契约 + 状态卡）、每次压缩后重锚定、每回合边界的跨代理状态增量。无每轮状态卡噪音。
+- **原生查询工具**——`query_session_memory` 经 `ctx.tools.register` 注册进模型工具面，支持文件系统式导航 `ls` / `cd` / `cat` / `grep`；内嵌 MCP server 保留为回退通道。
+- **行为契约技能**——`thread` 技能注册进底座技能目录（"需要细节就调工具"）并在锚点注入，模型不必"记得自己有记忆"。
+- **产出识别**——write/edit 类工具写出的 markdown 文档在写时登记为产出并建血缘边；`/thread-reg ast` 覆盖显式登记。
+- **决策与偏好的显式通道**——决策经 `/thread-reg dec`（用户，`--supersedes <id>` 演化取代链）或模型的 `record_decision` 工具（行为契约指示模型：用户定案或自己落定决策时调用）记录；偏好/教训经 `/thread-reg fdb` 记录（"不要/别"句式自动分类为教训）。决策/偏好的自然语言判定已停用——文本启发式零误报；未显式记录的仍留在事件流水可回拉（目标判定与完成判定保留，带多行粘贴守卫）。
+- **收尾沉淀 + 收件箱**——收尾词把进行中目标沉淀为待办；`/thread-cfm` 是唯一待处理收件箱：待办（`t#id`）与候选（`c#id`）一个视图——`do` 完成/转正（候选可带修正文本）、`cnl` 丢弃、`cnl all` 双清。状态卡展示前几条候选，杜绝无声堆积。
+- **行为边界（1.0，直说）**——候选不会自动产出：决策/偏好的自然语言判定已停用，`c#` 条目只会显示存量遗留，直到发布后的抽取层上线；待办相反有活跃产出（收尾沉淀 + 目标完成自愈）。决策不会自行过期——时间性决策用 `--supersedes` 显式收口。目标完成判定偏保守（非 ASCII ≥4 连字符 / 纯 ASCII ≥8 连字符重叠；短英文目标宁漏勿误，用 `/thread-rev gol` 废弃）。完整清单见 [Thread README](https://github.com/zhaoyuntao-wl/Thread) 的「诚实边界」一节。
+- **资源解除**——`/thread-rev <ast|dec|fdb|gol> <ids|all>` 解除注册：决策/偏好/产出删除（事件流水保留原文）、目标走状态机废弃并同步自愈关联待办。
+- **会话隔离**——`/thread-iso` / `/thread-uniso`；`/thread-pub <ast|dec|fdb|gol> <ids|all>` 把隔离期产生的行转共享。
+- **可选主动压缩**——`THREAD_AUTO_COMPACT=1` 时插件在回合边界监控 token 压力并静默触发 `compactNow`；无论哪种方式压缩，状态都会在压缩后重锚定。
 
 ## 安装
 
@@ -20,20 +25,8 @@
 dsh plugin add dsh-thread
 ```
 
-零配置：`@thread-memory/core` + `better-sqlite3` 依赖随包解决；插件激活即开始采集与注入。
-
-> **注意（原生模块）**：若插件启动报 "Could not locate the bindings file"，是 pnpm 10 安装时忽略了 `better-sqlite3` 的构建脚本所致。在 profile 目录执行一条命令即可修复：
->
-> ```sh
-> cd ~/.dsh/profiles/<你的 profile>
-> pnpm rebuild better-sqlite3
-> ```
->
-> 这是 pnpm 10 的 `onlyBuiltDependencies` 策略，非插件缺陷。
-
-## 启用（profile）
-
-dsh 所有插件都要在 profile 的 `bundles` 里引用才生效。在 `~/.dsh/profiles/<你的 profile>/package.json`：
+dsh 插件需在 profile 的 `bundles` 中引用才生效。在
+`~/.dsh/profiles/<your-profile>/package.json`：
 
 ```json
 {
@@ -42,46 +35,64 @@ dsh 所有插件都要在 profile 的 `bundles` 里引用才生效。在 `~/.dsh
   "dependencies": {},
   "dsh": {
     "profile": {
-      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-thread"]
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-headless",
+        "dsh-thread"
+      ]
     }
   }
 }
 ```
 
-若要在会话内/Web UI 使用 `query_session_memory`，在 profile 的 `cordis.patch.yml` 加 MCP overlay：
+除此之外零配置：`@thread-memory/core` 与 `better-sqlite3` 随依赖解析，插件激活即开始采集与注入。
 
-```yaml
-- insert:
-    - id: mcp-thread
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: thread
-        transport: stdio
-        command: npx
-        args: ['dsh-thread']
-        failOnStartupError: true
-```
+> **注意（原生模块）**：若插件启动报 "Could not locate the bindings file"，
+> 是 pnpm 10 在安装时跳过了 `better-sqlite3` 的构建脚本。在 profile 目录执行一条命令修复：
+>
+> ```sh
+> cd ~/.dsh/profiles/<your-profile>
+> pnpm rebuild better-sqlite3
+> ```
+>
+> 这是 pnpm 10 的 `onlyBuiltDependencies` 策略，不是插件缺陷。
 
-## 会话临时隔离
+## 配置
 
-同项目双代理并行做不相关任务时，用自然语言（"隔离/静默/别打扰"）或 `/isolate` 隔离本会话——对话上下文（消息/决策/反馈）仅自己可见，状态卡不再被对方更新干扰；工具事件仍共享（项目事实不断链）。`/unisolate` 解除（历史仍隔离），`/thread-publish <goal|decision|feedback> <id>` 或自然语言"把这个决策共享出去"按需沉淀转共享。
+| 配置 | 默认 | 含义 |
+|---|---|---|
+| `budgetLines` | 200 | 状态卡行数预算 |
+| `feedbackRows` | 50 | 工具守卫查询的反馈行数 |
+| `busyRetries` / `busyRetryDelayMs` | 20 / 100 | SQLITE_BUSY 重试策略 |
+| `compactPressureTokens` | 0 | 主动压缩的 token 阈值（0 = 关；需 `THREAD_AUTO_COMPACT=1` 拉活压缩服务） |
 
-## 版本约束
+## 命令
 
-peer 依赖使用 `^0.1.0-rc.6`（兼容 rc.6/rc.7 版本线）；跟随 dsh release train 适配，compat 矩阵见 CI。
+已注册为 dsh 真命令——命令面板可见、斜杠可补全、直接执行（不经模型一轮）。同样的文本在无命令 UI 的环境里按普通消息输入同样生效。
 
-## 开发
+| 命令 | 作用 |
+|---|---|
+| `/thread-reg <ast\|dec\|fdb\|gol>` | 列出该资源行（rev/supersede 所需的 id 来源） |
+| `/thread-reg <ast\|dec\|fdb\|gol> <text>` | 注册：ast = 路径（目录递归展开，上限 50）· dec = 决策（直接生效；`--supersedes <id>` 演化取代链）· fdb = 偏好/教训（"不要/别"句式自动分类）· gol = 目标 |
+| `/thread-rev <ast\|dec\|fdb\|gol>` | 列出该资源行 |
+| `/thread-rev <ast\|dec\|fdb\|gol> <ids\|all>` | 解除：dec/fdb/ast 删除（事件流水保留原文）· gol 废弃（状态机 + 关联待办自愈） |
+| `/thread-cfm` | 待处理收件箱：待办（`t#id`）+ 候选（`c#id`） |
+| `/thread-cfm do <id> [text]` | `t#` 完成待办 · `c#` 候选转正为生效决策（可带修正文本） |
+| `/thread-cfm cnl <id>` / `cnl all` | 丢弃一条 / 清空收件箱 |
+| `/thread-iso` / `/thread-uniso` | 隔离 / 解除会话 |
+| `/thread-pub` | 列出隔离行（全部资源，id 来源） |
+| `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | 隔离行转共享 |
 
-```sh
-pnpm install
-pnpm build
-pnpm typecheck
-pnpm test
-pnpm lint
-```
+## MCP 回退
 
-开发期 `@thread-memory/core` 经 `file:../thread/packages/core` 链接（CI 仅在 core 发布 npm 并切换为版本依赖后跑完整链路，见 `.github/workflows/ci.yml`）。
+包内附带 MCP server（`bin: dsh-thread`），在原生工具注册不可用的底座/场景下提供同一
+`query_session_memory` 契约。见 [Thread 记忆协议](https://github.com/zhaoyuntao-wl/Thread/blob/main/docs/design/memory-protocol.md)。
 
-## 许可证
+## 仓库关系
 
-[MIT](./LICENSE)
+本仓库承载 dsh 深度集成插件。底座无关内核（`@thread-memory/core`）与 Qoder 适配器在主仓库
+[Thread](https://github.com/zhaoyuntao-wl/Thread)。
+
+## License
+
+MIT

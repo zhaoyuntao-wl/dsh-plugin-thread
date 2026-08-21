@@ -11,12 +11,12 @@ function makeStore(): { store: ThreadStore; dir: string } {
   return { store, dir };
 }
 
-describe("handlePendingAnswer（§1.5.3d 弹窗选项处理）", () => {
-  it("确认 → 候选转正为 active 决策", () => {
+describe("handlePendingAnswer（§1.5.3d 折叠卡片选项处理；2026-08-21 更新/取消词汇）", () => {
+  it("更新 → 候选转正为 active 决策", () => {
     const { store, dir } = makeStore();
     try {
       const c = store.addPendingCandidate({ sessionId: "s1", text: "以后就在创造模式开发", kind: "decision", projectKey: "demo" });
-      handlePendingAnswer(store, "s1", c.id, "确认", { projectKey: "demo" });
+      handlePendingAnswer(store, "s1", c.id, "更新", { projectKey: "demo" });
       const active = store.getActiveDecisions("s1");
       expect(active).toHaveLength(1);
       expect(active[0].text).toBe("以后就在创造模式开发");
