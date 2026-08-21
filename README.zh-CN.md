@@ -19,6 +19,12 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 - **会话隔离**——`/thread-iso` / `/thread-uniso`；`/thread-pub <ast|dec|fdb|gol> <ids|all>` 把隔离期产生的行转共享。
 - **可选主动压缩**——`THREAD_AUTO_COMPACT=1` 时插件在回合边界监控 token 压力并静默触发 `compactNow`；无论哪种方式压缩，状态都会在压缩后重锚定。
 
+## 支持的 dsh 版本
+
+- **已验证**：dsh **0.1.1-rc.2**（当前；dsh CLI 与其 SDK 包同版锁步发布）。**0.1.0-rc.6** 亦可用（早期狗粮基线）但不推荐。
+- 插件钉 SDK peer `^0.1.1-rc.2`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；0.1.x 内升级预期兼容，每次升级经隔离契约探针 + CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
+- 未来大版本（0.2+）不做承诺；每个新 dsh 版本经评估并扩展 matrix 后才声明支持。
+
 ## 安装
 
 ```sh

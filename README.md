@@ -61,6 +61,19 @@ end to end.
   used for contract smoke-testing during development; it is inert unless
   `THREAD_B0_PROBE=1` is set, so normal sessions are unaffected.
 
+## Supported dsh versions
+
+- **Verified**: dsh **0.1.1-rc.2** (current; the dsh CLI and its SDK packages
+  ship version-locked). **0.1.0-rc.6** also works (the earlier dogfood
+  baseline) but is not recommended.
+- The plugin pins its SDK peers to `^0.1.1-rc.2`
+  (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`); within the
+  0.1.x train, upgrades are expected to be compatible and are verified by an
+  isolated contract probe plus the CI compat matrix
+  (`.github/workflows/ci.yml`) before this table is updated.
+- No promise is made for future major releases (0.2+); each new dsh release is
+  evaluated and the matrix extended before support is claimed.
+
 ## Install
 
 ```sh
