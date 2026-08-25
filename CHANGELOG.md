@@ -1,5 +1,17 @@
 # dsh-thread
 
+## 1.1.0
+
+### Minor Changes
+
+- 2ee7d11: record_decision human-confirmation gate: decisions park in memory and pop a userQuestions dialog at the tool-turn (confirm / cancel with inline edit; user opinions on cancelled entries are appended to the event stream and queryable). No-UI environments and subagents auto-confirm. Structural changes (commands, isolation toggles, goal updates, confirmed decisions) refresh the status card immediately.
+
+### Patch Changes
+
+- 2ee7d11: Handle the live dsh compaction/summary payload shape: `summary` is a `ContentBlock[]`, not a string. Checkpoints now land in the event stream, so post-compact re-anchoring fires on real compactions instead of being silently dropped at the DB bind.
+- 2ee7d11: Skip harness-injected messages so they never pollute the event stream: job-completion notices, workspace instructions, runtime-context snapshots, and skill-catalog updates are detected by their source `form` signal (probe-verified live shapes), with content-prefix heuristics as fallback. Injections no longer cancel pending decision confirmations; unknown shapes are logged to `capture-debug.log` for the probe.
+- 2ee7d11: Sync `query_session_memory` tool descriptions (native tool and embedded MCP server) with the post-compact recall governance: query-first-by-default wording, and `nav=ls` without a target now documents the directory view (active-session full ids + current-session inventory counts).
+
 ## 1.0.2
 
 ### Patch Changes
