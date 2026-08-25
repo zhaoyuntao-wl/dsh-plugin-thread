@@ -38,6 +38,9 @@ export interface Batch0ProbeEnv {
   compact: boolean
   followup: boolean
   deltaDrill: boolean
+  // ⑧ 自动压缩路径 live 实证（2026-08-25 修复后验证）：pre-step 同步 await compactRegion
+  //（自动压缩 compactIfNeeded 同款 API + 同款时序——压缩完成模型才继续下一步）
+  autocRegion: boolean
 }
 
 export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
@@ -128,6 +131,53 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
   const compactionTriggered = false
   let markerInjected = false
   let drillFired = false
+  // ⑧ 自动压缩路径模拟：第二个 pre-step（surface 已有首轮消息）时同步 await compactRegion。
+  // 与真实自动压缩同款时序（pre-step 中间件同步等待 → 模型不并发跑 → whole-surface 稳定性检查可过）；
+  // 不设一次性 flag——首 pre-step 时 surface 未成形（nodes<2）跳过，等下一个 pre-step。
+  let autocRegionDone = false
+  ctx.on('agent/pre-step', async (payload: { agent: Agent; signal?: AbortSignal }, next) => {
+    if (!env.autocRegion || autocRegionDone) return next()
+    try {
+      if (!compaction || !tokenMeter) {
+        autocRegionDone = true
+        log('08-autoc-region', { ok: false, reason: `service missing compaction=${!!compaction} meter=${!!tokenMeter}` })
+        return next()
+      }
+      const m = tokenMeter.measure(payload.agent.session)
+      const nodes = (m as { nodes?: Array<{ seq: number }> }).nodes ?? []
+      if (nodes.length < 2) {
+        log('08-autoc-region', { ok: false, reason: 'surface too small', nodes: nodes.length })
+        return next()
+      }
+      // end 从倒数第二个节点起向前回退：compactRegion 拒绝不平衡边界（tool-call/result 配对不可拆），
+      // 真实自动压缩用 selectCompactableRange 找平衡点（dsh 私有），探针以只读 validate 失败为信号回退。
+      const start = nodes[0].seq
+      let lastError = ''
+      for (let endIdx = nodes.length - 2; endIdx >= 1; endIdx -= 1) {
+        try {
+          const result = await compaction.compactRegion(start, nodes[endIdx].seq, payload.agent, payload.signal)
+          autocRegionDone = true
+          log('08-autoc-region', {
+            ok: result !== null,
+            reason: result === null ? 'null range (no compactable surface)' : undefined,
+            start,
+            end: nodes[endIdx].seq,
+            attempts: nodes.length - 1 - endIdx,
+            compactionId: result === null ? null : (result as { compactionId?: string }).compactionId,
+          })
+          return next()
+        } catch (err) {
+          lastError = String(err)
+        }
+      }
+      autocRegionDone = true
+      log('08-autoc-region', { ok: false, error: `no balanced boundary: ${lastError}` })
+    } catch (err) {
+      autocRegionDone = true
+      log('08-autoc-region', { ok: false, error: String(err) })
+    }
+    return next()
+  })
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     try {
       const eventType = (event as unknown as { type: string }).type
@@ -171,6 +221,10 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
         const body = extractText((event as { data: { content: Array<{ type: string; text?: string }> } }).data.content ?? [])
         if (body.includes(B0_MARKER_PREFIX)) {
           log('06-marker-landed', { body: body.slice(0, 200) })
+        }
+        // ⑧ 主插件压缩后重锚定卡进入 surface 的证据（自动路径 live 验证点）
+        if (body.includes('[Thread 压缩后重锚定]')) {
+          log('08-reanchor-landed', { body: body.slice(0, 160) })
         }
         if (body.startsWith('[Thread 状态更新（来自其他会话）]')) {
           log('07-delta-injected', { body: body.slice(0, 300) })

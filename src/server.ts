@@ -14,9 +14,9 @@ const server = new McpServer({
 
 const TOOL_DESCRIPTION = [
   "查询会话记忆：事件流水与结构化表（目标/决策/反馈）的按需检索，支持导航原语（ls/cd/cat/grep）。",
-  "需要历史细节、上下文或不确定时调用本工具，不要编造；返回的命中事件可按引用回拉原文。",
+  "涉及本会话历史/本项目状态的话题先查再答，不要编造；返回的命中事件可按引用回拉原文。",
   "未找到时返回 not-found 标记与追问建议。",
-  "示例：拿不准某决策的来龙去脉时，query='登录方案 决策' 即可带回原文；nav=ls target=<会话> 列出产出与待办。",
+  "示例：拿不准某决策的来龙去脉时，query='登录方案 决策' 即可带回原文；nav=ls 无 target 列出目录视图（活跃会话完整 id + 本会话库存）；nav=ls target=<会话> 列出产出与待办。",
 ].join("\n");
 
 server.tool(
@@ -32,7 +32,7 @@ server.tool(
     until: z.string().optional().describe("时间上界 ISO（精确查询路径；结构化表类忽略）"),
     order: z.enum(["asc", "desc"]).optional().describe("排序方向，默认 desc（最近优先）"),
     count_only: z.boolean().optional().describe("只返回计数（如'调了几次某工具'）"),
-    nav: z.enum(["ls", "cd", "cat", "grep"]).optional().describe("导航指令：ls 列子项（会话产出/待办或产出关联）| cd 节点详情 | cat 全文 | grep 检索带关联上下文"),
+    nav: z.enum(["ls", "cd", "cat", "grep"]).optional().describe("导航指令：ls 列子项（无 target=目录视图：活跃会话完整 id + 本会话库存计数；target=会话/产出）| cd 节点详情 | cat 全文 | grep 检索带关联上下文"),
     target: z.string().optional().describe("导航目标（会话 id / asset id / 文档路径）"),
   },
   async (args) => {

@@ -14,6 +14,7 @@ import {
   classifyWriteEvent,
   defaultPaths,
   deriveProjectKey,
+  detectGoalCompletion,
   detectSituation,
   extractTitleFromContent,
   getStateDelta,
@@ -25,7 +26,7 @@ import {
   THREAD_BEHAVIOR_CONTRACT,
   THREAD_NORTH_STAR,
 } from '@thread-memory/core'
-import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { runBatch0Probes } from './batch0-probe.js'
@@ -34,7 +35,13 @@ export const name = 'dsh-thread'
 
 // 批 0 探针模式 / 批 4 主动压缩增强层：inject 声明依赖 compaction（服务可用性驱动加载拉活惰性服务；
 // tokenMeter 由其传递依赖拉起）。正常会话不依赖 compaction（压缩治理走订阅 + 重锚定）。
-export const inject = process.env.THREAD_B0_PROBE === '1' || process.env.THREAD_AUTO_COMPACT === '1' ? ['tools', 'compaction'] : ['tools']
+// userQuestions（2026-08-25 决策确认门修复）：必须经 inject 声明才能进入本插件 fiber 作用域
+//（ask_user_question / apiproxy 同款声明方式；dsh-base 全组合自带，web/headless 均可解析）。
+export const inject = [
+  'tools',
+  'userQuestions',
+  ...(process.env.THREAD_B0_PROBE === '1' || process.env.THREAD_AUTO_COMPACT === '1' ? ['compaction'] : []),
+]
 
 const PLUGIN_NAME = name
 
@@ -49,6 +56,9 @@ export const Config = z.object({
   compactPressureTokens: z.number().int().nonnegative().default(Number(process.env.THREAD_AUTO_COMPACT_TOKENS ?? 0)),
   // 候选超时天数（2026-08-20 收口）：0=不超时；超龄 pending 候选转 ignored（原文在事件流水，决策不丢）
   candidateTtlDays: z.number().int().nonnegative().default(Number(process.env.THREAD_CANDIDATE_TTL_DAYS ?? 14)),
+  // 决策确认门（2026-08-25 用户定案 #16）：auto = record_decision 登记后弹窗确认（无 UI 环境自动确认）；
+  // off = 直接落库（旧行为，逃生开关）。env THREAD_CONFIRM_DECISIONS=off 等价。
+  confirmDecisions: z.enum(['auto', 'off']).default(process.env.THREAD_CONFIRM_DECISIONS === 'off' ? 'off' : 'auto'),
 })
 export type Config = z.infer<typeof Config>
 
@@ -100,6 +110,38 @@ export function isCompactCheckpointSource(source: { kind?: string; plugin?: stri
   return source?.kind === 'plugin' && source?.plugin === COMPACT_CHECKPOINT_SOURCE_PLUGIN
 }
 
+// Harness 注入消息识别（2026-08-25 用户定案，内容前缀兜底版）：<system-reminder> 包裹的工作区指令/skills 目录、
+// 无包裹的运行时上下文快照、后台作业完成通知——非用户话语，不落事件流。
+// 前缀是启发式兜底；真实 source 形状经 capture-debug.log 探针拿到后升级为按源语义过滤。
+export function isHarnessInjection(body: string): boolean {
+  const t = body.trimStart()
+  return (
+    t.startsWith('<system-reminder>') ||
+    t.startsWith('Current runtime context.') ||
+    t.startsWith('background job ')
+  )
+}
+
+// 非用户话语注入（2026-08-26 两步走第二步，2026-08-26 升级：语义规则 = form 信号集，四者均经 capture-debug.log
+// 探针 live 实证）：
+//   notice       = tool-jobs 作业完成通知（kind=plugin, plugin=tool-jobs）
+//   instructions = 工作区指令注入（kind=agent-instructions, baseline AGENTS.md）
+//   snapshot     = 运行时上下文快照（kind=plugin, plugin=@deepseek-ai/dsh-system-prompt）
+//   catalog      = skills 目录变更（kind=skill-catalog）
+// form 字段仅注入源携带，真实用户消息（kind=user）无 form，故按 form 判定即为语义层完整覆盖；
+// 前缀判定退居兜底（未知 form 形态），探针持续收集未知形状。
+const NON_USER_INJECTION_FORMS = new Set(['notice', 'instructions', 'snapshot', 'catalog'])
+
+export function isNonUserInjection(
+  source: { kind?: string; plugin?: string; form?: string } | undefined,
+  body: string,
+): boolean {
+  return (
+    (source?.form !== undefined && NON_USER_INJECTION_FORMS.has(source.form)) ||
+    isHarnessInjection(body)
+  )
+}
+
 // ─── 命令语法（2026-08-21 全量重构，用户定案）───
 // 资源四类：ast 产出 / dec 决策 / fdb 偏好·教训 / gol 目标。
 // thread-reg 注册（无参列资源行）/ thread-rev 解除（决策·偏好·产出删除、目标废弃）/
@@ -142,11 +184,12 @@ function parseIds(raw: string): number[] {
 }
 
 // dsh compaction/summary 事件 payload（官方 dsh-compaction-basic commitCompactionBody 契约，
-// SessionEventMap 未展开该类型，插件侧按运行时形状声明）
+// SessionEventMap 未展开该类型，插件侧按运行时形状声明；summary 是 ContentBlock[] 而非 string——
+// 2026-08-25 现网故障教训：类型按"以为的形状"声明会制造与 live 不一致的假契约）
 interface CompactionSummaryData {
   compactionId: string
   sourceCommandId?: string
-  summary: string
+  summary: string | ContentBlock[]
   provider?: string
   model?: string
 }
@@ -414,7 +457,7 @@ interface CommandRuntimeLike {
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
 function registerThreadCommands(
   ctx: Context,
-  deps: { openStore: () => ThreadStore; projectKey: string; busyRetries: number; busyRetryDelayMs: number },
+  deps: { openStore: () => ThreadStore; projectKey: string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
 ): void {
   const commands = ctx.get?.('commands') as CommandRuntimeLike | undefined
   if (!commands) {
@@ -450,7 +493,7 @@ function registerThreadCommands(
     }
     const s = deps.openStore()
     let text = ''
-    handleRegCommand(s, sid, cmd, { projectKey: deps.projectKey, isolation: s.getSessionIsolation(sid), cwd: process.cwd(), busyRetries: deps.busyRetries, busyRetryDelayMs: deps.busyRetryDelayMs }, (t) => {
+    handleRegCommand(s, sid, cmd, { projectKey: deps.projectKey, isolation: s.getSessionIsolation(sid), cwd: process.cwd(), busyRetries: deps.busyRetries, busyRetryDelayMs: deps.busyRetryDelayMs, onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
     })
     return text
@@ -464,7 +507,7 @@ function registerThreadCommands(
     }
     const s = deps.openStore()
     let text = ''
-    handleRevCommand(s, sid, cmd, (t) => {
+    handleRevCommand(s, sid, cmd, { onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
     })
     return text
@@ -492,7 +535,7 @@ function registerThreadCommands(
     }
     const s = deps.openStore()
     let text = ''
-    handlePubCommand(s, sid, cmd, (t) => {
+    handlePubCommand(s, sid, cmd, { onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
     })
     return text
@@ -501,12 +544,14 @@ function registerThreadCommands(
   reg('thread-iso', '隔离本会话（上下文对其他代理不可见，工具事实仍共享）', '', (inv) => {
     const sid = sessionIdOf(inv)
     deps.openStore().setSessionIsolation(sid, true)
+    deps.refreshCard(sid)
     return '[Thread] 本会话已隔离。'
   })
 
   reg('thread-uniso', '解除本会话隔离', '', (inv) => {
     const sid = sessionIdOf(inv)
     deps.openStore().setSessionIsolation(sid, false)
+    deps.refreshCard(sid)
     return '[Thread] 本会话已解除隔离。'
   })
 }
@@ -518,7 +563,7 @@ export function handleRegCommand(
   store: ThreadStore,
   sessionId: string,
   cmd: RegCommand,
-  opts: { projectKey?: string; isolation?: boolean; cwd?: string; busyRetries?: number; busyRetryDelayMs?: number },
+  opts: { projectKey?: string; isolation?: boolean; cwd?: string; busyRetries?: number; busyRetryDelayMs?: number; onMutate?: () => void },
   respond: (text: string) => void,
 ): void {
   if (cmd.action === 'list') {
@@ -541,6 +586,7 @@ export function handleRegCommand(
     respond(paths.length === 1
       ? `[Thread] 已登记产出：${text}`
       : `[Thread] 已登记 ${paths.length} 个产出（目录递归，上限 ${MAX_ASSET_DIR_FILES}）：${text}/...`)
+    if (paths.length > 0) opts.onMutate?.()
     return
   }
   if (resource === 'dec') {
@@ -549,10 +595,12 @@ export function handleRegCommand(
       respond(r
         ? `[Thread] 已记录决策 #${r.replacement.id}（取代 #${r.superseded.id}）。`
         : `[Thread] #${cmd.supersedesId} 不存在、非本会话或已失效。`)
+      if (r) opts.onMutate?.()
       return
     }
     const d = store.addDecision(sessionId, text, { projectKey: opts.projectKey, isolation: opts.isolation })
     respond(`[Thread] 已记录决策 #${d.id}。`)
+    opts.onMutate?.()
     return
   }
   if (resource === 'fdb') {
@@ -560,10 +608,12 @@ export function handleRegCommand(
     const kind = /不要|别|别再|不要再/.test(text) ? 'correction' : 'preference'
     store.addFeedback(sessionId, text, kind, { projectKey: opts.projectKey, isolation: opts.isolation })
     respond(`[Thread] 已记录${kind === 'correction' ? '教训' : '偏好'}：${text.slice(0, 60)}`)
+    opts.onMutate?.()
     return
   }
   const g = store.addGoal(sessionId, text, { projectKey: opts.projectKey, isolation: opts.isolation })
   respond(`[Thread] 已记录目标 #${g.id}。`)
+  opts.onMutate?.()
 }
 
 // /thread-rev 执行：决策/偏好/产出硬删除（事件流水保留原文）、目标废弃（状态机 + 待办自愈）
@@ -571,6 +621,7 @@ export function handleRevCommand(
   store: ThreadStore,
   sessionId: string,
   cmd: RevCommand,
+  opts: { onMutate?: () => void },
   respond: (text: string) => void,
 ): void {
   if (cmd.action === 'list') {
@@ -586,6 +637,7 @@ export function handleRevCommand(
       if (store.deleteAsset(id)) n++
     }
     respond(`[Thread] 已解除 ${n} 个产出登记。`)
+    if (n > 0) opts.onMutate?.()
     return
   }
   if (resource === 'dec') {
@@ -595,6 +647,7 @@ export function handleRevCommand(
       if (store.deleteDecision(id)) n++
     }
     respond(`[Thread] 已删除 ${n} 条决策（事件流水保留原文）。`)
+    if (n > 0) opts.onMutate?.()
     return
   }
   if (resource === 'fdb') {
@@ -604,6 +657,7 @@ export function handleRevCommand(
       if (store.deleteFeedback(id)) n++
     }
     respond(`[Thread] 已删除 ${n} 条反馈。`)
+    if (n > 0) opts.onMutate?.()
     return
   }
   // gol：只废弃 active 目标（已完成/已废弃不重复动，ids 命中时明示跳过）；todo 随目标状态自愈 dropped
@@ -619,6 +673,7 @@ export function handleRevCommand(
     }
   }
   respond(`[Thread] 已废弃 ${n} 个目标（关联待办已同步）${skipped > 0 ? `，跳过 ${skipped} 个已完成/已废弃目标` : ''}。`)
+  if (n > 0) opts.onMutate?.()
 }
 
 // /thread-pub 执行：隔离行转共享；无参 = 列隔离行（全部或单资源）
@@ -626,6 +681,7 @@ export function handlePubCommand(
   store: ThreadStore,
   sessionId: string,
   cmd: PubCommand,
+  opts: { onMutate?: () => void },
   respond: (text: string) => void,
 ): void {
   if (cmd.action === 'list') {
@@ -641,6 +697,7 @@ export function handlePubCommand(
     if (store.unisolateRow(sessionId, table, id)) n++
   }
   respond(`[Thread] 已共享 ${n} 条${RESOURCE_LABEL[cmd.resource]}。`)
+  if (n > 0) opts.onMutate?.()
 }
 
 // /thread-cfm 执行：待处理收件箱（t# 待办 / c# 候选）
@@ -706,6 +763,7 @@ export function apply(ctx: Context, config: Config) {
       compact: process.env.THREAD_B0_COMPACT === '1',
       followup: process.env.THREAD_B0_FOLLOWUP === '1',
       deltaDrill: process.env.THREAD_B0_DELTA_DRILL === '1',
+      autocRegion: process.env.THREAD_B0_AUTOC_REGION === '1',
     })
   }
   const budgetLines = config.budgetLines ?? 200
@@ -714,6 +772,7 @@ export function apply(ctx: Context, config: Config) {
   const busyRetryDelayMs = config.busyRetryDelayMs ?? 100
   const compactPressureTokens = config.compactPressureTokens ?? 0
   const candidateTtlDays = config.candidateTtlDays ?? 14
+  const confirmDecisions = config.confirmDecisions ?? 'auto'
   const cwd = process.env.THREAD_CWD ?? process.cwd()
   const projectKey = deriveProjectKey(cwd)
   const paths = defaultPaths(cwd)
@@ -757,14 +816,104 @@ export function apply(ctx: Context, config: Config) {
     })
   }
 
+  // 结构变更后状态卡刷新（2026-08-25 用户指令：thread-reg/thread-rev/record_decision 变更结构化表后，
+  // 模型持有的状态卡立即过期）→ 变更动作成功后注入新卡，不等下一次压缩/新会话。
+  // situation normal（与首轮锚点卡同构）；失败降级只记日志，不阻塞命令回执。
+  function injectStatusCardRefresh(sessionId: string, prefix = '[Thread 状态卡刷新]'): void {
+    try {
+      const s = openStore()
+      const card = buildStatusCard(s, {
+        sessionId,
+        projectKey,
+        budgetLines,
+        isolated: s.getSessionIsolation(sessionId),
+        situation: 'normal',
+      })
+      injectFromEvent(sessionId, `${prefix}\n${card}`)
+    } catch (err) {
+      console.error(`thread dsh: status card refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  // ─── record_decision 人工确认门（2026-08-25 用户定案 #16）───
+  // 挂起（内存 pending，不落库）→ 立即经 userQuestions 通道弹窗（工具执行轮内时机，
+  // 与 ask_user_question 同通道已实证可用；不阻塞本轮回答——fire-and-forget）；
+  // turn/end 与下一个 pre-step 兜底重试未弹出的挂起项；无 UI 环境 / 子代理 →
+  // 自动确认落库并以刷新卡提醒用户；取消 / 未决即发下一条消息 = 丢弃。
+  // 诊断：每个分支写 ~/.thread/gate-debug.log（+ console），失败现场自解释。
+  const getUserQuestions = (): UserQuestionServiceLike | undefined => {
+    try {
+      const viaCtx = (ctx as { userQuestions?: UserQuestionServiceLike }).userQuestions
+      if (viaCtx) {
+        return viaCtx
+      }
+      return (ctx.get?.('userQuestions') as UserQuestionServiceLike | undefined)
+        ?? (ctx.get?.('userQuestions', true) as UserQuestionServiceLike | undefined)
+    } catch {
+      return undefined
+    }
+  }
+  const gateLogPath = join(dirname(paths.structuredDbPath), 'gate-debug.log')
+  function gateLog(message: string): void {
+    console.error(message)
+    try {
+      appendFileSync(gateLogPath, `${new Date().toISOString()} ${message}\n`)
+    } catch {
+      // 诊断日志失败不影响主路径
+    }
+  }
+  const decisionGates = new Map<string, DecisionGateSession>()
+
+  function gateFor(sessionId: string, agent: unknown): DecisionGateSession {
+    let gate = decisionGates.get(sessionId)
+    if (!gate) {
+      const uq = getUserQuestions()
+      gateLog(`decision gate: created session=${sessionId} uq=${!!uq}`)
+      gate = new DecisionGateSession(uq, agent, {
+        write: (entry) => {
+          const s = openStore()
+          return writeGateDecision(s, sessionId, entry, {
+            projectKey,
+            isolation: s.getSessionIsolation(sessionId),
+          })
+        },
+        confirmed: () => injectStatusCardRefresh(sessionId, '[Thread 决策确认 · 状态卡刷新]'),
+        autoConfirmed: () => injectStatusCardRefresh(sessionId, '[Thread 决策已自动确认 · 状态卡刷新]'),
+        cancelled: (dropped) => {
+          const notes = dropped.map((d) => d.annotation).filter((n): n is string => !!n)
+          if (notes.length > 0) {
+            // 意见持久化（2026-08-25 用户定案）：原样落事件流水，query_session_memory 可查回
+            try {
+              const s = openStore()
+              withBusyRetry(() => appendGateAnnotations(s, sessionId, dropped, {
+                projectKey,
+                isolation: s.getSessionIsolation(sessionId),
+              }), busyRetries, busyRetryDelayMs)
+            } catch (err) {
+              console.error(`thread dsh: gate annotation append failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
+          const tail = notes.length > 0
+            ? `上一轮登记的决策未获确认，已丢弃（未记录）。用户意见：${notes.join('；')}`
+            : '上一轮登记的决策未获确认，已丢弃（未记录）。'
+          injectFromEvent(sessionId, `[Thread 决策取消] ${tail}`)
+        },
+        failed: () => injectFromEvent(sessionId, '[Thread 决策确认] 取代目标不存在或已失效，决策未记录。'),
+        logError: gateLog,
+      }, () => agents?.get(sessionId))
+      decisionGates.set(sessionId, gate)
+    }
+    return gate
+  }
+
   // G3 原生工具注册（max 2.5）：query_session_memory 经 ctx.tools.register 进模型 tools 参数区。
   // 与 MCP overlay 共用 core runQueryTool（防两处漂移）；MCP 通道保留（多底座适配器 + 回退）。
   const disposeQueryTool = ctx.tools.register(defineTool({
     name: 'query_session_memory',
-    description: '查询会话记忆：事件流水与结构化表（目标/决策/反馈）的按需检索，支持导航原语（ls/cd/cat/grep）。需要历史细节、上下文或不确定时调用，不要编造；未找到时返回 not-found 标记。',
+    description: '查询会话记忆：事件流水与结构化表（目标/决策/反馈）的按需检索，支持导航原语（ls/cd/cat/grep）。涉及本会话历史/本项目状态的话题先查再答，不要编造；未找到时返回 not-found 标记与追问建议。',
     parameters: {
       query: { type: 'string', description: '检索查询（grep 导航时为其关键词），如 "登录方案 决策"' },
-      nav: { type: 'string', enum: ['ls', 'cd', 'cat', 'grep'], description: '导航指令：ls 列子项（会话产出/待办或产出关联）| cd 节点详情 | cat 全文 | grep 检索带关联上下文' },
+      nav: { type: 'string', enum: ['ls', 'cd', 'cat', 'grep'], description: '导航指令：ls 列子项（无 target=目录视图：活跃会话完整 id + 本会话库存计数；target=会话/产出）| cd 节点详情 | cat 全文 | grep 检索带关联上下文' },
       target: { type: 'string', description: '导航目标（会话 id / asset id / 文档路径）' },
       limit: { type: 'integer', description: '最大返回片段数' },
       session_id: { type: 'string', description: '会话 ID；缺省使用最近活跃会话' },
@@ -803,7 +952,7 @@ export function apply(ctx: Context, config: Config) {
   // supersedes_id 可选：跨会话接续时取代旧决策（id 从状态卡/决策列表/query_session_memory 获取）。
   const disposeRecordTool = ctx.tools.register(defineTool({
     name: 'record_decision',
-    description: '把用户定案或你做出的影响后续的决策记录为 Thread 正式决策（决策链）。用户拍板方案、你确定采用某做法、或用户说"就按X"时调用；一条调用记一条决策，text = 决策本身（不带论证）。',
+    description: '把用户定案或你做出的影响后续的决策记录为 Thread 正式决策（决策链）。用户拍板方案、你确定采用某做法、或用户说"就按X"时调用；一条调用记一条决策，text = 决策本身（不带论证）。登记后需用户在弹窗确认才生效（确认前不算已记录，报告为待确认）；无弹窗环境自动确认。',
     parameters: {
       text: { type: 'string', description: '决策文本（一句话，不含论证过程）' },
       supersedes_id: { type: 'integer', description: '可选：被本决策取代的旧决策 id（查询状态卡/决策列表后确定）' },
@@ -819,15 +968,31 @@ export function apply(ctx: Context, config: Config) {
       if (!text) {
         return '[Thread] record_decision 未记录：决策文本为空。'
       }
-      const isolation = s.getSessionIsolation(sid)
       const supersedesId = typeof args.supersedes_id === 'number' ? args.supersedes_id : undefined
+      // 人工确认门（2026-08-25 用户定案 #16）：先挂起不落库，turn/end 弹窗确认后生效；
+      // off（逃生开关）走旧直接落库路径
+      if (confirmDecisions !== 'off') {
+        const supersededText = supersedesId !== undefined
+          ? s.getDecisions(sid).find((d) => d.id === supersedesId)?.text
+          : undefined
+        const gate = gateFor(sid, exec.agent)
+        gate.park({ text, supersedesId, supersededText }, exec.agent)
+        gateLog(`decision gate: parked session=${sid} supersedes=${supersedesId ?? 'none'}`)
+        // 立即弹（工具执行轮内时机，与 ask_user_question 同通道已实证可用）；
+        // fire-and-forget 不阻塞本轮回答；失败由 turn/end / 下个 pre-step 兜底重试
+        void gate.fire()
+        return `[Thread] 决策已登记待确认：${text.slice(0, 60)}。本轮回答结束后弹窗请你确认，确认后生效；取消或未确认则丢弃。`
+      }
+      const isolation = s.getSessionIsolation(sid)
       if (supersedesId !== undefined) {
         const r = s.supersedeDecisionById(sid, supersedesId, text)
+        if (r) injectStatusCardRefresh(sid)
         return r
           ? `[Thread] 已记录决策 #${r.replacement.id}（取代 #${r.superseded.id}）。`
           : `[Thread] record_decision：决策 #${supersedesId} 不存在、非本会话或已失效，未记录。`
       }
       const d = s.addDecision(sid, text, { projectKey, isolation })
+      injectStatusCardRefresh(sid)
       return `[Thread] 已记录决策 #${d.id}：${text.slice(0, 60)}`
     },
   }))
@@ -855,7 +1020,7 @@ export function apply(ctx: Context, config: Config) {
   // dsh 真命令注册（2026-08-20 用户定：命令发现性不能只靠 README/状态卡——状态卡面向模型）。
   // ctx.commands.register → 命令面板/斜杠补全/直接执行（不经模型一轮）；handler 返回文本由 UI 直接呈现。
   // 消息白名单解析保留为回退（headless / 无命令 UI 的底座；web 命令被命令系统拦截不会到达 user/message，无双触发）。
-  registerThreadCommands(ctx, { openStore, projectKey, busyRetries, busyRetryDelayMs })
+  registerThreadCommands(ctx, { openStore, projectKey, busyRetries, busyRetryDelayMs, refreshCard: injectStatusCardRefresh })
 
   // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）。
   // 官方 ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined；
@@ -946,6 +1111,15 @@ export function apply(ctx: Context, config: Config) {
           console.error(`thread dsh: auto-compact check failed: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+      if (eventType === 'turn/end') {
+        // 决策确认门（2026-08-25 用户定案 #16）：立即弹未成功时由 turn/end 兜底重试；
+        // 重试等待中（retryPending）不再从 turn/end 触发——重试走下一个 pre-step（轮内时机）。
+        const gate = decisionGates.get(sessionId)
+        if (gate && !gate.retryPending && !gate.inflight && gate.hasOpenWork) {
+          gateLog(`decision gate: fire from turn/end session=${sessionId}`)
+          void gate.fire()
+        }
+      }
       if (eventType === 'compaction/summary') {
         handleCompactionSummary(s, sessionId, event as unknown as { time: number; data: CompactionSummaryData }, {
           projectKey,
@@ -979,6 +1153,26 @@ export function apply(ctx: Context, config: Config) {
           if (!body) {
             return
           }
+          // Harness 注入消息不是用户话语（2026-08-26 用户定案，两步走第二步）：
+          // 语义规则（plugin 源 notice/instructions form）+ 前缀兜底 → 不落事件流、不触发分析、不取消待确认决策。
+          // 探针：命中时把真实 source 形状 + 正文头写 capture-debug.log，未知形态持续收集（#14 纪律）。
+          if (isNonUserInjection(source as { kind?: string; plugin?: string; form?: string }, body)) {
+            try {
+              appendFileSync(
+                join(dirname(paths.structuredDbPath), 'capture-debug.log'),
+                `${new Date().toISOString()} ${JSON.stringify(source)} | ${body.slice(0, 60).replace(/\s+/g, ' ')}\n`,
+              )
+            } catch {
+              // 探针失败不影响主路径
+            }
+            return
+          }
+          // 决策确认门：弹窗未决时用户发下一条消息 = 取消（中止弹窗 → ASK_ABORTED → 丢弃）
+          const gate = decisionGates.get(sessionId)
+          if (gate?.hasOpenWork) {
+            gate.abort()
+          }
+          const beforeIsolation = s.getSessionIsolation(sessionId)
           const isoCmd = parseIsoCommand(body)
           if (isoCmd?.action === 'isolate') {
             s.setSessionIsolation(sessionId, true)
@@ -986,6 +1180,10 @@ export function apply(ctx: Context, config: Config) {
             s.setSessionIsolation(sessionId, false)
           }
           const after = s.getSessionIsolation(sessionId)
+          // 隔离开关切换 → 状态卡立即刷新（2026-08-25 用户定案，缺口 3）
+          if (isoCmd && beforeIsolation !== after) {
+            injectStatusCardRefresh(sessionId)
+          }
           const appended = appendWithRetry(s, {
             session_id: sessionId,
             kind: 'user_message',
@@ -994,13 +1192,19 @@ export function apply(ctx: Context, config: Config) {
           }, { projectKey, origin: `dsh://msg#${event.data.id}`, isolation: after }, busyRetries, busyRetryDelayMs)
           // 命令消息跳过 applyAnalysis（2026-08-21）：命令只走命令处理，防双创建/副作用
           if (!isThreadCommandLine(body)) {
-            applyAnalysis(s, sessionId, { user_msg: body }, {
+            // 自然语言目标变化 → 状态卡立即刷新（2026-08-25 用户定案，缺口 1）：
+            // 完成命中先用同一确定性检测预判（applyAnalysis 内部随后执行同一判定）
+            const completionHit = detectGoalCompletion(body, s.getActiveGoalsMerged(sessionId, projectKey))
+            const applied = applyAnalysis(s, sessionId, { user_msg: body }, {
               sourceEvent: appended.id,
               ts: iso(event.time),
               projectKey,
               origin: `dsh://msg#${event.data.id}`,
               isolation: after,
             })
+            if (applied.goals.length > 0 || completionHit) {
+              injectStatusCardRefresh(sessionId)
+            }
           }
           // 收尾词标记（1.2）：turn/end 时沉淀
           if (isClosingWord(body)) {
@@ -1010,15 +1214,15 @@ export function apply(ctx: Context, config: Config) {
           // 命令执行（2026-08-21 重构）：回执经事件驱动注入（queueMicrotask 防 append 重入）
           const regCmd = parseRegCommand(body)
           if (regCmd) {
-            handleRegCommand(s, sessionId, regCmd, { projectKey, isolation: after, cwd, busyRetries, busyRetryDelayMs }, (text) => injectFromEvent(sessionId, text))
+            handleRegCommand(s, sessionId, regCmd, { projectKey, isolation: after, cwd, busyRetries, busyRetryDelayMs, onMutate: () => injectStatusCardRefresh(sessionId) }, (text) => injectFromEvent(sessionId, text))
           }
           const revCmd = parseRevCommand(body)
           if (revCmd) {
-            handleRevCommand(s, sessionId, revCmd, (text) => injectFromEvent(sessionId, text))
+            handleRevCommand(s, sessionId, revCmd, { onMutate: () => injectStatusCardRefresh(sessionId) }, (text) => injectFromEvent(sessionId, text))
           }
           const pubCmd = parsePubCommand(body)
           if (pubCmd) {
-            handlePubCommand(s, sessionId, pubCmd, (text) => injectFromEvent(sessionId, text))
+            handlePubCommand(s, sessionId, pubCmd, { onMutate: () => injectStatusCardRefresh(sessionId) }, (text) => injectFromEvent(sessionId, text))
           } else if (PUBLISH_NL_RE.test(body.trim())) {
             // 自然语言沉淀：作用于本会话最近一条隔离行
             publishLatestIsolated(s, sessionId)
@@ -1095,6 +1299,11 @@ export function apply(ctx: Context, config: Config) {
   // 关闭即沉淀（2026-08-20）：会话 dispose（web 关标签页/新会话/进程正常收尾）→ 最后一搏沉淀，
   // 幂等 + 目标完成时 todo 已自愈——直接关闭代理不丢进行中目标（用户常见使用习惯，北极星 #2）
   ctx.on('session/disposed', (session: Session) => {
+    const gate = decisionGates.get(String(session.id))
+    if (gate) {
+      gate.abort()
+      decisionGates.delete(String(session.id))
+    }
     try {
       const s = openStore()
       const sid = String(session.id)
@@ -1113,6 +1322,16 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('agent/pre-step', async (payload, next) => {
     if (isOwnInjection((payload as { messages?: readonly unknown[] }).messages ?? [])) {
       return next()
+    }
+    // 决策确认门兜底（2026-08-25 用户定案 #16）：turn/end 弹窗失败（通道轮外不可用）→
+    // 下一个真实轮次开始（轮内时机，ask_user_question 已实证可用）重试弹窗。
+    const retrySessionId = payload.agent.session?.id
+    if (retrySessionId !== undefined && retrySessionId !== null && retrySessionId !== '') {
+      const retryGate = decisionGates.get(String(retrySessionId))
+      if (retryGate?.retryPending && retryGate.hasOpenWork && !retryGate.inflight) {
+        gateLog(`decision gate: fire from pre-step retry session=${String(retrySessionId)}`)
+        void retryGate.fire()
+      }
     }
     const turn = payload.turn
     if (injectedTurns.has(turn)) return next()
@@ -1261,6 +1480,8 @@ interface UserQuestionServiceLike {
       header?: string
       options?: Array<{ label: string; description?: string }>
     }>
+    agent?: unknown
+    signal?: AbortSignal
   }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>
 }
 
@@ -1319,6 +1540,250 @@ export function handlePendingAnswer(
   // '推迟' 与未知选项：保持 pending（prompt_count 已 +1，后续靠唤醒/超时）
 }
 
+// ─── record_decision 人工确认门（2026-08-25 用户定案 #16）───
+// 模型调用 record_decision 后不立即落库：内存挂起 → 立即经 userQuestions 通道弹窗
+//（轮内时机，fire-and-forget 不阻塞回答；inject 声明保证服务可达）；弹窗兼做编辑/
+// 意见框（2026-08-25 用户定案）：确认+输入文字 → 以输入文字为新决策文本；取消/
+// 只输入 → 不落库且输入文字作为意见转达模型。无 UI 环境（NO_PROVIDER）或子代理
+// （DELEGATED_CALLER / CALLER_NOT_LIVE）自动确认落库并以刷新卡提醒用户；未决时
+// 发下一条消息（ASK_ABORTED）= 丢弃。宁可漏记，不可错记。
+export const DECISION_GATE_CONFIRM = '确认记录'
+export const DECISION_GATE_CANCEL = '取消（不记录）'
+
+export interface PendingDecisionEntry {
+  text: string
+  supersedesId?: number
+  supersededText?: string
+}
+
+export interface DecisionWriteResult {
+  id: number
+  supersededId?: number
+}
+
+// 取消/丢弃桶携带用户在弹窗里的自定义输入（意见转达，2026-08-25 用户定案）
+export interface CancelledDecision {
+  entry: PendingDecisionEntry
+  annotation?: string
+}
+
+export interface DecisionGateHooks {
+  write(entry: PendingDecisionEntry): DecisionWriteResult | undefined
+  confirmed(results: readonly { entry: PendingDecisionEntry; result: DecisionWriteResult }[]): void
+  autoConfirmed(results: readonly { entry: PendingDecisionEntry; result: DecisionWriteResult }[]): void
+  cancelled(dropped: readonly CancelledDecision[]): void
+  failed(entries: readonly PendingDecisionEntry[]): void
+  logError(message: string): void
+}
+
+export function buildDecisionGateQuestions(entries: readonly PendingDecisionEntry[]): Array<{
+  id: string
+  header: string
+  question: string
+  detail: string
+  options: Array<{ label: string; description?: string }>
+}> {
+  return entries.map((entry, i) => ({
+    id: `thread-dec-${i}`,
+    header: 'Thread 决策确认',
+    question: '模型登记了这条决策，确认记录吗？（可修改文字后再确认；输入文字而不确认 = 取消并转达意见）',
+    detail: entry.supersedesId !== undefined
+      ? `新决策：${entry.text}\n\n将取代 #${entry.supersedesId}${entry.supersededText ? `：${entry.supersededText.slice(0, 120)}` : ''}`
+      : entry.text,
+    options: [
+      { label: DECISION_GATE_CONFIRM },
+      { label: DECISION_GATE_CANCEL, description: '丢弃，不记录' },
+    ],
+  }))
+}
+
+export function resolveGateAnswer(selected: readonly string[] | undefined): 'confirmed' | 'cancelled' {
+  return selected?.includes(DECISION_GATE_CONFIRM) ? 'confirmed' : 'cancelled'
+}
+
+// 实际落库（取代/新建同一路径）：取代目标无效 → undefined（失败桶，不降级为新建）
+export function writeGateDecision(
+  store: ThreadStore,
+  sessionId: string,
+  entry: PendingDecisionEntry,
+  opts: { projectKey?: string; isolation?: boolean },
+): DecisionWriteResult | undefined {
+  if (entry.supersedesId !== undefined) {
+    const r = store.supersedeDecisionById(sessionId, entry.supersedesId, entry.text)
+    return r ? { id: r.replacement.id, supersededId: r.superseded.id } : undefined
+  }
+  const d = store.addDecision(sessionId, entry.text, { projectKey: opts.projectKey, isolation: opts.isolation })
+  return { id: d.id }
+}
+
+// 单会话确认门（导出便于单测）：park 挂起 → fire 弹窗并解析 → 结果回调 hooks。
+// 时机策略（2026-08-25 用户定案 #16，现网调优后）：park 后立即弹（工具执行轮内时机，
+// 与 ask_user_question 同通道已实证可用，fire-and-forget 不阻塞回答）；该时机失败
+// （NO_PROVIDER/CALLER_NOT_LIVE/DELEGATED_CALLER）→ 保留条目，下一个 agent/pre-step
+// （轮内）重试一次；重试仍失败或无 UI 环境 → 自动确认落库并由 hooks.autoConfirmed 提醒。
+export type DecisionGateFireResult = 'ok' | 'auto' | 'cancelled' | 'empty' | 'retry'
+
+export class DecisionGateSession {
+  private entries: PendingDecisionEntry[] = []
+  private controller: AbortController | undefined
+  private fallbackAgent: unknown
+  private liveAgentLookup: (() => unknown) | undefined
+  retryPending = false
+  inflight = false
+
+  constructor(
+    private uq: UserQuestionServiceLike | undefined,
+    agent: unknown,
+    private hooks: DecisionGateHooks,
+    liveAgentLookup?: () => unknown,
+  ) {
+    this.fallbackAgent = agent
+    this.liveAgentLookup = liveAgentLookup
+  }
+
+  park(entry: PendingDecisionEntry, agent: unknown): void {
+    this.fallbackAgent = agent
+    this.entries.push(entry)
+  }
+
+  get pendingCount(): number {
+    return this.entries.length
+  }
+
+  get hasOpenWork(): boolean {
+    return this.inflight || this.entries.length > 0
+  }
+
+  // 弹窗在途时用户发下一条消息 / 会话 dispose：中止在途弹窗（ASK_ABORTED → 丢弃）。
+  // 仅挂起未弹（retry 等待）不中止——条目留给 pre-step 重试。
+  abort(): void {
+    this.controller?.abort()
+  }
+
+  async fire(): Promise<DecisionGateFireResult> {
+    if (this.inflight || this.entries.length === 0) {
+      return 'empty'
+    }
+    this.inflight = true
+    const entries = this.entries
+    this.entries = []
+    this.controller = new AbortController()
+    try {
+      if (!this.uq) {
+        this.hooks.logError('decision gate: no userQuestions service → auto confirm')
+        this.retryPending = false
+        this.resolve(entries, 'auto')
+        return 'auto'
+      }
+      // live agent 优先（注册表现役对象，服务侧身份校验 agents.get(agent.id)===agent 必过）
+      const agent = this.liveAgentLookup?.() ?? this.fallbackAgent
+      const answer = await this.uq.ask({
+        questions: buildDecisionGateQuestions(entries),
+        agent,
+        signal: this.controller.signal,
+      })
+      this.retryPending = false
+      this.resolve(entries, 'answer', answer.answers)
+      return 'ok'
+    } catch (err) {
+      const code = (err as { code?: string })?.code
+      const detail = err instanceof Error ? err.message : String(err)
+      if (code === 'NO_PROVIDER' || code === 'DELEGATED_CALLER' || code === 'CALLER_NOT_LIVE') {
+        if (this.retryPending) {
+          // pre-step（轮内）重试仍失败 → 自动确认（无 UI 等价）
+          this.hooks.logError(`decision gate: retry ask failed code=${code} (${detail}) → auto confirm`)
+          this.retryPending = false
+          this.resolve(entries, 'auto')
+          return 'auto'
+        }
+        // turn/end（轮外）失败 → 保留条目，下个 pre-step 重试
+        this.hooks.logError(`decision gate: turn/end ask failed code=${code} (${detail}) → retry at next pre-step`)
+        this.retryPending = true
+        this.entries.unshift(...entries)
+        return 'retry'
+      }
+      // ASK_ABORTED（在途弹窗被中止）/ ASK_CANCELLED（用户关闭弹窗）/ 未知错误 → 未决即取消
+      this.retryPending = false
+      this.hooks.cancelled(entries.map((entry) => ({ entry })))
+      if (code !== 'ASK_ABORTED' && code !== 'ASK_CANCELLED') {
+        this.hooks.logError(`decision gate: ask failed code=${code ?? 'unknown'} (${detail}) → cancelled`)
+      }
+      return 'cancelled'
+    } finally {
+      this.inflight = false
+    }
+  }
+
+  private resolve(
+    entries: readonly PendingDecisionEntry[],
+    mode: 'answer' | 'auto',
+    answers?: Array<{ id: string; selected: string[]; custom?: string }>,
+  ): void {
+    const confirmed: Array<{ entry: PendingDecisionEntry; result: DecisionWriteResult }> = []
+    const dropped: CancelledDecision[] = []
+    const failed: PendingDecisionEntry[] = []
+    for (const [i, entry] of entries.entries()) {
+      const custom = mode === 'answer' ? answers?.[i]?.custom?.trim() || undefined : undefined
+      if (mode === 'answer' && resolveGateAnswer(answers?.[i]?.selected) === 'cancelled') {
+        dropped.push({ entry, annotation: custom })
+        continue
+      }
+      // 弹窗兼做编辑器（2026-08-25 用户定案）：确认时输入的文字替换决策文本
+      const target: PendingDecisionEntry = custom ? { ...entry, text: custom } : entry
+      const result = this.hooks.write(target)
+      if (result) {
+        confirmed.push({ entry: target, result })
+      } else {
+        failed.push(target)
+      }
+    }
+    if (confirmed.length > 0) {
+      if (mode === 'auto') {
+        this.hooks.autoConfirmed(confirmed)
+      } else {
+        this.hooks.confirmed(confirmed)
+      }
+    }
+    if (failed.length > 0) {
+      this.hooks.failed(failed)
+    }
+    if (dropped.length > 0) {
+      this.hooks.cancelled(dropped)
+    }
+  }
+}
+
+// 弹窗意见持久化（2026-08-25 用户定案）：未确认决策附带的自定义输入原样落事件流水
+//（kind=user_message，meta.gate_annotation 标记），query_session_memory 可查回。
+export function appendGateAnnotations(
+  store: ThreadStore,
+  sessionId: string,
+  dropped: readonly CancelledDecision[],
+  opts: { projectKey?: string; isolation?: boolean; now?: number } = {},
+): number {
+  let n = 0
+  let seq = 0
+  for (const d of dropped) {
+    if (!d.annotation) {
+      continue
+    }
+    const ts = opts.now ?? Date.now()
+    store.append({
+      session_id: sessionId,
+      kind: 'user_message',
+      ts: iso(ts),
+      body: `决策弹窗意见：${d.annotation}（针对未获确认的决策：${d.entry.text.slice(0, 120)}）`,
+      meta: { gate_annotation: true, decision_text: d.entry.text.slice(0, 200) },
+    }, {
+      projectKey: opts.projectKey,
+      origin: `dsh://gate-annotation#${sessionId}#${ts}#${++seq}`,
+      isolation: opts.isolation,
+    })
+    n++
+  }
+  return n
+}
+
 // 压缩边界落库（导出便于单测）：dsh compaction/summary → compact_checkpoint。
 // post-compact 情境判定（detectSituation）依赖本会话最近事件含 compact_checkpoint，
 // 此事件此前缺失导致该情境在 dsh 上从未触发（2026-08-18 修复）。
@@ -1333,11 +1798,18 @@ export function handleCompactionSummary(
     // 契约防御：缺摘要/缺事务 id 不落库（压缩事务异常时不产生 checkpoint 标记）
     return
   }
+  // live 形状归一化（2026-08-25 现网修复）：dsh compaction/summary 的 summary 是 ContentBlock[]
+  //（dsh-compaction-basic commitCompactionBody 契约），单测 fixture 曾用 string 掩盖此差异——
+  // 数组直接落库被 better-sqlite3 拒绝绑定 → throw → 压缩边界从未落库、重锚定从未触发。
+  const summaryBody = typeof summary === 'string' ? summary : extractText(summary as readonly ContentBlock[])
+  if (!summaryBody) {
+    return
+  }
   appendWithRetry(store, {
     session_id: sessionId,
     kind: 'compact_checkpoint',
     ts: iso(event.time),
-    body: summary,
+    body: summaryBody,
     meta: {
       trigger: event.data.sourceCommandId !== undefined ? 'manual' : 'auto',
       model: event.data.model,

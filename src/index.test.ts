@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   Config,
+  DECISION_GATE_CANCEL,
+  DECISION_GATE_CONFIRM,
+  DecisionGateSession,
+  appendGateAnnotations,
+  buildDecisionGateQuestions,
   buildToolCallMeta,
   expandAssetPaths,
   extractText,
@@ -9,6 +14,8 @@ import {
   handleRegCommand,
   handleRevCommand,
   isClosingWord,
+  isHarnessInjection,
+  isNonUserInjection,
   isOwnInjection,
   isThreadCommandLine,
   parseCfmCommand,
@@ -19,7 +26,10 @@ import {
   renderCfmList,
   renderIsolatedRows,
   renderResourceList,
+  resolveGateAnswer,
+  writeGateDecision,
 } from "./index.js";
+import type { DecisionGateHooks, PendingDecisionEntry } from "./index.js";
 import { ThreadStore } from "@thread-memory/core";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -228,6 +238,35 @@ describe("handleRegCommand（注册四资源 + 回执）", () => {
 });
 
 describe("handleRevCommand（解除四资源）", () => {
+  it("变更动作触发 onMutate、列动作/无效删除不触发（2026-08-25 状态卡刷新）", () => {
+    const { store, dir } = makeStore();
+    try {
+      let mutate = 0;
+      const onMutate = () => { mutate++; };
+      handleRegCommand(store, "s1", { action: "register", resource: "dec", text: "决策 A" }, { projectKey: "demo", onMutate }, () => {});
+      expect(mutate).toBe(1);
+      handleRegCommand(store, "s1", { action: "list", resource: "dec" }, { projectKey: "demo", onMutate }, () => {});
+      expect(mutate).toBe(1);
+      // supersede 目标不存在 → 无变更，不触发
+      handleRegCommand(store, "s1", { action: "register", resource: "dec", text: "决策 B", supersedesId: 999 }, { projectKey: "demo", onMutate }, () => {});
+      expect(mutate).toBe(1);
+      handleRevCommand(store, "s1", { action: "revoke", resource: "dec", ids: [1] }, { onMutate }, () => {});
+      expect(mutate).toBe(2);
+      // 删除不存在的 id → n=0，不触发
+      handleRevCommand(store, "s1", { action: "revoke", resource: "dec", ids: [999] }, { onMutate }, () => {});
+      expect(mutate).toBe(2);
+      handleRevCommand(store, "s1", { action: "list", resource: "dec" }, { onMutate }, () => {});
+      expect(mutate).toBe(2);
+      // fdb / gol 变更同样触发
+      handleRegCommand(store, "s1", { action: "register", resource: "fdb", text: "偏好 X" }, { projectKey: "demo", onMutate }, () => {});
+      expect(mutate).toBe(3);
+      handleRegCommand(store, "s1", { action: "register", resource: "gol", text: "目标 X" }, { projectKey: "demo", onMutate }, () => {});
+      expect(mutate).toBe(4);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("dec 删除（事件流水保留）；fdb 删除；gol 废弃 + 待办自愈", () => {
     const { store, dir } = makeStore();
     try {
@@ -235,11 +274,11 @@ describe("handleRevCommand（解除四资源）", () => {
       store.addFeedback("s1", "临时偏好", "preference", { projectKey: "demo" });
       const g = store.addGoal("s1", "废弃目标", { projectKey: "demo" });
       store.addTodo({ sessionId: "s1", text: "未完成", basis: `goal:${g.id}` });
-      handleRevCommand(store, "s1", { action: "revoke", resource: "dec", ids: [d.id] }, () => {});
+      handleRevCommand(store, "s1", { action: "revoke", resource: "dec", ids: [d.id] }, {}, () => {});
       expect(store.getDecisions("s1")).toHaveLength(0);
-      handleRevCommand(store, "s1", { action: "revoke", resource: "fdb", ids: undefined }, () => {});
+      handleRevCommand(store, "s1", { action: "revoke", resource: "fdb", ids: undefined }, {}, () => {});
       expect(store.getFeedback("s1", 10)).toHaveLength(0);
-      handleRevCommand(store, "s1", { action: "revoke", resource: "gol", ids: [g.id] }, () => {});
+      handleRevCommand(store, "s1", { action: "revoke", resource: "gol", ids: [g.id] }, {}, () => {});
       expect(store.getGoals("s1").find((x) => x.id === g.id)?.status).toBe("abandoned");
       expect(store.listTodos({ sessionId: "s1" })[0].status).toBe("dropped");
     } finally {
@@ -252,7 +291,7 @@ describe("handleRevCommand（解除四资源）", () => {
     const { store, dir } = makeStore();
     try {
       const a = store.registerAsset({ sessionId: "s1", path: "docs/x.md", title: "X", projectKey: "demo" });
-      handleRevCommand(store, "s1", { action: "revoke", resource: "ast", ids: [a.id] }, () => {});
+      handleRevCommand(store, "s1", { action: "revoke", resource: "ast", ids: [a.id] }, {}, () => {});
       expect(store.listAssets({ sessionId: "s1" })).toHaveLength(0);
     } finally {
       store.close();
@@ -266,7 +305,7 @@ describe("handleRevCommand（解除四资源）", () => {
       for (let i = 0; i < 60; i++) {
         store.registerAsset({ sessionId: "s1", path: `docs/f${i}.md`, title: `F${i}`, projectKey: "demo" });
       }
-      handleRevCommand(store, "s1", { action: "revoke", resource: "ast", ids: undefined }, () => {});
+      handleRevCommand(store, "s1", { action: "revoke", resource: "ast", ids: undefined }, {}, () => {});
       expect(store.listAssets({ sessionId: "s1" })).toHaveLength(0);
     } finally {
       store.close();
@@ -281,11 +320,30 @@ describe("handlePubCommand（隔离行转共享）", () => {
     try {
       const g = store.addGoal("s1", "隔离目标", { projectKey: "demo", isolation: true });
       store.addDecision("s1", "隔离决策", { projectKey: "demo", isolation: true });
-      handlePubCommand(store, "s1", { action: "publish", resource: "gol", ids: [g.id] }, () => {});
+      handlePubCommand(store, "s1", { action: "publish", resource: "gol", ids: [g.id] }, {}, () => {});
       expect(store.listIsolatedRows("s1").some((r) => r.kind === "goal")).toBe(false);
       expect(store.listIsolatedRows("s1").some((r) => r.kind === "decision")).toBe(true);
-      handlePubCommand(store, "s1", { action: "publish", resource: "dec", ids: undefined }, () => {});
+      handlePubCommand(store, "s1", { action: "publish", resource: "dec", ids: undefined }, {}, () => {});
       expect(store.listIsolatedRows("s1")).toHaveLength(0);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("变更动作触发 onMutate、列动作/空发布不触发（2026-08-25 状态卡刷新缺口 2）", () => {
+    const { store, dir } = makeStore();
+    try {
+      const d = store.addDecision("s1", "隔离决策", { projectKey: "demo", isolation: true });
+      let mutations = 0;
+      const opts = { onMutate: () => { mutations++; } };
+      handlePubCommand(store, "s1", { action: "list" }, opts, () => {});
+      handlePubCommand(store, "s1", { action: "publish", resource: "gol", ids: undefined }, opts, () => {});
+      expect(mutations).toBe(0);
+      handlePubCommand(store, "s1", { action: "publish", resource: "dec", ids: [d.id] }, opts, () => {});
+      expect(mutations).toBe(1);
+      handlePubCommand(store, "s1", { action: "publish", resource: "dec", ids: undefined }, opts, () => {});
+      expect(mutations).toBe(1);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -360,7 +418,7 @@ describe("renderResourceList / renderCfmList / renderIsolatedRows（id 可见来
       expect(renderResourceList(store, "s1", "gol", "reg")).toContain("已完成");
       // ids 命中已完成 → 跳过并回执明示
       const responses: string[] = [];
-      handleRevCommand(store, "s1", { action: "revoke", resource: "gol", ids: [done.id, active.id] }, (t) => responses.push(t));
+      handleRevCommand(store, "s1", { action: "revoke", resource: "gol", ids: [done.id, active.id] }, {}, (t) => responses.push(t));
       expect(responses.at(-1)).toContain("已废弃 1 个目标");
       expect(responses.at(-1)).toContain("跳过 1 个");
     } finally {
@@ -527,6 +585,60 @@ describe("isOwnInjection（卡片独立成轮守卫，B⑧ 迭代）", () => {
   });
 });
 
+describe("isHarnessInjection（2026-08-25 Harness 注入过滤，前缀兜底版）", () => {
+  it("命中三类已知注入：system-reminder / 运行时快照 / 作业通知", () => {
+    expect(isHarnessInjection("<system-reminder>\nThe following workspace instructions may be relevant…")).toBe(true);
+    expect(isHarnessInjection("<system-reminder>\nUpdated instructions from: AGENTS.md\n\nThis file changed…")).toBe(true);
+    expect(isHarnessInjection("<system-reminder>\nThe available skill catalog changed…")).toBe(true);
+    expect(isHarnessInjection("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.")).toBe(true);
+    expect(isHarnessInjection("background job pwsh-1 (pwsh: pnpm lint …) finished [status: completed, exit code: 0]")).toBe(true);
+  });
+
+  it("前导空白仍命中（trimStart 后判定）", () => {
+    expect(isHarnessInjection("  \n<system-reminder>技能目录")).toBe(true);
+  });
+
+  it("普通用户消息不命中（含'系统提醒'字样的自然语言）", () => {
+    expect(isHarnessInjection("把状态卡格式规整一下")).toBe(false);
+    expect(isHarnessInjection("系统提醒我该吃饭了")).toBe(false);
+    expect(isHarnessInjection("Current runtime context 这个词是什么意思")).toBe(false);
+    expect(isHarnessInjection("")).toBe(false);
+  });
+});
+
+describe("isNonUserInjection（2026-08-26 语义规则：form ∈ {notice, instructions, snapshot, catalog}，均探针实证）", () => {
+  it("作业完成通知（live 探针实证形状 tool-jobs）→ 命中语义规则", () => {
+    const source = { kind: "plugin", plugin: "tool-jobs", form: "notice" };
+    expect(isNonUserInjection(source, "background job pwsh-1 (pwsh: …) finished")).toBe(true);
+    // 语义规则独立于正文：即使正文不带已知前缀也跳过
+    expect(isNonUserInjection(source, "job completed")).toBe(true);
+  });
+
+  it("2026-08-26 重启注入三条 live 实证形状 → 按 form 语义命中（kind 各异，form 是判定信号）", () => {
+    expect(isNonUserInjection({ kind: "agent-instructions", form: "instructions" }, "<system-reminder> The following workspace instructions…")).toBe(true);
+    expect(isNonUserInjection({ kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot" }, "Current runtime context. …")).toBe(true);
+    expect(isNonUserInjection({ kind: "skill-catalog", form: "catalog" }, "<system-reminder> The available skill catalog changed…")).toBe(true);
+    // 语义独立于正文：正文不带已知前缀也跳过
+    expect(isNonUserInjection({ kind: "agent-instructions", form: "instructions" }, "workspace rules")).toBe(true);
+    expect(isNonUserInjection({ kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot" }, "runtime snapshot")).toBe(true);
+    expect(isNonUserInjection({ kind: "skill-catalog", form: "catalog" }, "skill list")).toBe(true);
+  });
+
+  it("真实用户消息（kind=user 或普通正文）→ 不命中", () => {
+    expect(isNonUserInjection({ kind: "user" }, "把状态卡格式规整一下")).toBe(false);
+    expect(isNonUserInjection(undefined, "普通消息")).toBe(false);
+  });
+
+  it("未知 form 且正文无已知前缀 → 不命中（留给探针收集，不误伤用户消息）", () => {
+    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "ordinary text")).toBe(false);
+  });
+
+  it("前缀兜底仍生效（source 形状未知时按正文判定）", () => {
+    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "<system-reminder>\n技能目录")).toBe(true);
+    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "Current runtime context. …")).toBe(true);
+  });
+});
+
 describe("Config（官方 basic/config：插件配置经 Standard Schema 校验后注入 apply）", () => {
   it("缺省字段由 schema 填充默认值（budgetLines 200 / feedbackRows 50 / 重试 20×100ms）", () => {
     expect(Config.parse({})).toEqual({
@@ -536,17 +648,19 @@ describe("Config（官方 basic/config：插件配置经 Standard Schema 校验�
       busyRetryDelayMs: 100,
       compactPressureTokens: 0,
       candidateTtlDays: 14,
+      confirmDecisions: "auto",
     });
   });
 
   it("覆盖写生效（部署差异化配置）", () => {
-    expect(Config.parse({ budgetLines: 120, feedbackRows: 80, busyRetries: 5, busyRetryDelayMs: 250, compactPressureTokens: 60000, candidateTtlDays: 7 })).toEqual({
+    expect(Config.parse({ budgetLines: 120, feedbackRows: 80, busyRetries: 5, busyRetryDelayMs: 250, compactPressureTokens: 60000, candidateTtlDays: 7, confirmDecisions: "off" })).toEqual({
       budgetLines: 120,
       feedbackRows: 80,
       busyRetries: 5,
       busyRetryDelayMs: 250,
       compactPressureTokens: 60000,
       candidateTtlDays: 7,
+      confirmDecisions: "off",
     });
   });
 
@@ -554,5 +668,303 @@ describe("Config（官方 basic/config：插件配置经 Standard Schema 校验�
     expect(() => Config.parse({ budgetLines: -1 })).toThrow();
     expect(() => Config.parse({ busyRetries: 2.5 })).toThrow();
     expect(() => Config.parse({ feedbackRows: "many" })).toThrow();
+    expect(() => Config.parse({ confirmDecisions: "maybe" })).toThrow();
+  });
+});
+
+describe("record_decision 人工确认门（2026-08-25 用户定案 #16）", () => {
+  type UqLike = {
+    ask(request: {
+      questions: Array<{ id: string; question: string; detail?: string; header?: string; options?: Array<{ label: string; description?: string }> }>;
+      agent?: unknown;
+      signal?: AbortSignal;
+    }): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>;
+  };
+
+  function makeHooks(calls: string[]): DecisionGateHooks {
+    return {
+      write: (e: PendingDecisionEntry) => {
+        calls.push(`write:${e.text}`);
+        return { id: 1 };
+      },
+      confirmed: (rs) => calls.push(`confirmed:${rs.length}`),
+      autoConfirmed: (rs) => calls.push(`auto:${rs.length}`),
+      cancelled: (es) => calls.push(`cancelled:${es.length}`),
+      failed: (es) => calls.push(`failed:${es.length}`),
+      logError: (m) => calls.push(`error:${m}`),
+    };
+  }
+
+  it("buildDecisionGateQuestions：普通与取代两种 detail 形状", () => {
+    const [q1] = buildDecisionGateQuestions([{ text: "方案 A" }]);
+    expect(q1.id).toBe("thread-dec-0");
+    expect(q1.header).toBe("Thread 决策确认");
+    expect(q1.detail).toBe("方案 A");
+    expect(q1.options.map((o) => o.label)).toEqual([DECISION_GATE_CONFIRM, DECISION_GATE_CANCEL]);
+    const [q2] = buildDecisionGateQuestions([{ text: "方案 B", supersedesId: 1, supersededText: "旧决策" }]);
+    expect(q2.detail).toContain("将取代 #1");
+    expect(q2.detail).toContain("旧决策");
+  });
+
+  it("resolveGateAnswer：确认/取消/未答", () => {
+    expect(resolveGateAnswer([DECISION_GATE_CONFIRM])).toBe("confirmed");
+    expect(resolveGateAnswer([DECISION_GATE_CANCEL])).toBe("cancelled");
+    expect(resolveGateAnswer([])).toBe("cancelled");
+    expect(resolveGateAnswer(undefined)).toBe("cancelled");
+  });
+
+  it("writeGateDecision：新建/有效取代/无效取代（真实 ThreadStore）", () => {
+    const { store, dir } = makeStore();
+    const r1 = writeGateDecision(store, "s1", { text: "决策甲" }, {});
+    expect(r1?.id).toBeGreaterThan(0);
+    const r2 = writeGateDecision(store, "s1", { text: "决策乙", supersedesId: 1, supersededText: "决策甲" }, {});
+    expect(r2?.id).toBeGreaterThan(0);
+    expect(r2?.supersededId).toBe(1);
+    expect(writeGateDecision(store, "s1", { text: "x", supersedesId: 999 }, {})).toBeUndefined();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fire：用户确认 → 落库回调 confirmed；取消 → 不写库回调 cancelled", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] }),
+    };
+    const gate = new DecisionGateSession(uq, { id: "agent" }, makeHooks(calls));
+    gate.park({ text: "方案 A" }, { id: "agent" });
+    await gate.fire();
+    expect(calls).toEqual(["write:方案 A", "confirmed:1"]);
+
+    const calls2: string[] = [];
+    const uq2: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CANCEL] }] }),
+    };
+    const gate2 = new DecisionGateSession(uq2, null, makeHooks(calls2));
+    gate2.park({ text: "方案 A" }, null);
+    await gate2.fire();
+    expect(calls2).toEqual(["cancelled:1"]);
+  });
+
+  it("fire：多条挂起 → 确认的落库、取消的丢弃", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => ({
+        answers: [
+          { id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] },
+          { id: "thread-dec-1", selected: [DECISION_GATE_CANCEL] },
+        ],
+      }),
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    gate.park({ text: "方案 C" }, null);
+    await gate.fire();
+    expect(calls).toEqual(["write:方案 A", "confirmed:1", "cancelled:1"]);
+  });
+
+  it("fire：确认时输入文字 = 以输入文字为新决策文本（弹窗兼做编辑器，2026-08-25 用户定案）", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM], custom: "修正后的决策" }] }),
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    expect(await gate.fire()).toBe("ok");
+    expect(calls).toEqual(["write:修正后的决策", "confirmed:1"]);
+  });
+
+  it("fire：只输入不点按钮 / 点取消时输入文字 → 不落库，意见经 cancelled 转达", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => ({
+        answers: [
+          { id: "thread-dec-0", selected: [], custom: "不应记录这个" },
+          { id: "thread-dec-1", selected: [DECISION_GATE_CANCEL], custom: "这条也不对" },
+        ],
+      }),
+    };
+    const hooks: DecisionGateHooks = {
+      ...makeHooks(calls),
+      cancelled: (dropped) => calls.push(`cancelled:${dropped.map((d) => d.annotation ?? "-").join(",")}`),
+    };
+    const gate = new DecisionGateSession(uq, null, hooks);
+    gate.park({ text: "方案 A" }, null);
+    gate.park({ text: "方案 C" }, null);
+    expect(await gate.fire()).toBe("ok");
+    expect(calls).toEqual(["cancelled:不应记录这个,这条也不对"]);
+  });
+
+  it("appendGateAnnotations：意见原样落事件流水（query_session_memory 可查回）", () => {
+    const { store, dir } = makeStore();
+    const n = appendGateAnnotations(store, "s1", [
+      { entry: { text: "原决策 A" }, annotation: "这个不对" },
+      { entry: { text: "原决策 B" } },
+      { entry: { text: "原决策 C" }, annotation: "也不是这样" },
+    ], { projectKey: "demo", now: 1700000000000 });
+    expect(n).toBe(2);
+    const rows = store.getRecentEvents("s1", 10).filter((e) => e.kind === "user_message");
+    expect(rows.map((e) => e.body)).toEqual([
+      "决策弹窗意见：也不是这样（针对未获确认的决策：原决策 C）",
+      "决策弹窗意见：这个不对（针对未获确认的决策：原决策 A）",
+    ]);
+    expect((rows[0].meta as { gate_annotation?: boolean }).gate_annotation).toBe(true);
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fire：无 UI 服务（uq 缺失）→ 立即自动确认并回调 autoConfirmed", async () => {
+    const calls: string[] = [];
+    const gate = new DecisionGateSession(undefined, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    expect(await gate.fire()).toBe("auto");
+    expect(calls).toEqual(["error:decision gate: no userQuestions service → auto confirm", "write:方案 A", "auto:1"]);
+  });
+
+  it("fire：turn/end 通道失败（NO_PROVIDER/CALLER_NOT_LIVE/DELEGATED_CALLER）→ 保留重试，重试仍失败才自动确认", async () => {
+    const failUq = (code: string): UqLike => ({
+      ask: async () => {
+        throw Object.assign(new Error(code), { code });
+      },
+    });
+    for (const code of ["NO_PROVIDER", "CALLER_NOT_LIVE", "DELEGATED_CALLER"]) {
+      const calls: string[] = [];
+      const gate = new DecisionGateSession(failUq(code), null, makeHooks(calls));
+      gate.park({ text: "方案 A" }, null);
+      expect(await gate.fire()).toBe("retry");
+      expect(calls).toEqual([`error:decision gate: turn/end ask failed code=${code} (${code}) → retry at next pre-step`]);
+      expect(gate.pendingCount).toBe(1);
+      expect(gate.retryPending).toBe(true);
+      expect(await gate.fire()).toBe("auto");
+      expect(calls).toEqual([
+        `error:decision gate: turn/end ask failed code=${code} (${code}) → retry at next pre-step`,
+        `error:decision gate: retry ask failed code=${code} (${code}) → auto confirm`,
+        "write:方案 A",
+        "auto:1",
+      ]);
+    }
+  });
+
+  it("fire：turn/end 失败后 pre-step（轮内）重试成功 → 弹窗确认生效", async () => {
+    const calls: string[] = [];
+    let fails = true;
+    const uq: UqLike = {
+      ask: async () => {
+        if (fails) {
+          throw Object.assign(new Error("not live"), { code: "CALLER_NOT_LIVE" });
+        }
+        return { answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] };
+      },
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    expect(await gate.fire()).toBe("retry");
+    fails = false;
+    expect(await gate.fire()).toBe("ok");
+    expect(calls).toEqual([
+      "error:decision gate: turn/end ask failed code=CALLER_NOT_LIVE (not live) → retry at next pre-step",
+      "write:方案 A",
+      "confirmed:1",
+    ]);
+  });
+
+  it("fire：live agent 优先于 park 时捕获的 agent", async () => {
+    let askedAgent: unknown;
+    const uq: UqLike = {
+      ask: async (request) => {
+        askedAgent = request.agent;
+        return { answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] };
+      },
+    };
+    const live = { id: "live-agent" };
+    const gate = new DecisionGateSession(uq, { id: "parked-agent" }, makeHooks([]), () => live);
+    gate.park({ text: "方案 A" }, { id: "parked-agent" });
+    expect(await gate.fire()).toBe("ok");
+    expect(askedAgent).toBe(live);
+  });
+
+  it("fire：abort 只中止在途弹窗，挂起未弹时不影响后续 fire", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] }),
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    gate.abort(); // 挂起未弹 → 无可中止，条目保留
+    expect(await gate.fire()).toBe("ok");
+    expect(calls).toEqual(["write:方案 A", "confirmed:1"]);
+  });
+
+  it("fire：ASK_CANCELLED（用户关闭弹窗）→ 丢弃", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: async () => {
+        throw Object.assign(new Error("cancelled"), { code: "ASK_CANCELLED" });
+      },
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    await gate.fire();
+    expect(calls).toEqual(["cancelled:1"]);
+  });
+
+  it("fire：弹窗未决时用户发下一条消息（abort → ASK_ABORTED）→ 丢弃", async () => {
+    const calls: string[] = [];
+    const uq: UqLike = {
+      ask: (request) => new Promise<{ answers: Array<{ id: string; selected: string[] }> }>((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { code: "ASK_ABORTED" }));
+        });
+      }),
+    };
+    const gate = new DecisionGateSession(uq, null, makeHooks(calls));
+    gate.park({ text: "方案 A" }, null);
+    const firing = gate.fire();
+    gate.abort();
+    await firing;
+    expect(calls).toEqual(["cancelled:1"]);
+  });
+
+  it("fire：取代目标无效（write 返回 undefined）→ failed 回调", async () => {
+    const calls: string[] = [];
+    const hooks: DecisionGateHooks = {
+      ...makeHooks(calls),
+      write: () => {
+        calls.push("write");
+        return undefined;
+      },
+    };
+    const uq: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] }),
+    };
+    const gate = new DecisionGateSession(uq, null, hooks);
+    gate.park({ text: "方案 A", supersedesId: 999 }, null);
+    await gate.fire();
+    expect(calls).toEqual(["write", "failed:1"]);
+  });
+
+  it("端到端：确认后决策真实落库（取代链生效）", async () => {
+    const { store, dir } = makeStore();
+    const uq: UqLike = {
+      ask: async () => ({ answers: [{ id: "thread-dec-0", selected: [DECISION_GATE_CONFIRM] }] }),
+    };
+    const hooks: DecisionGateHooks = {
+      write: (e) => writeGateDecision(store, "s1", e, {}),
+      confirmed: () => {},
+      autoConfirmed: () => {},
+      cancelled: () => {},
+      failed: () => {},
+      logError: () => {},
+    };
+    const gate = new DecisionGateSession(uq, null, hooks);
+    gate.park({ text: "决策甲" }, null);
+    await gate.fire();
+    expect(store.getDecisions("s1").map((d) => d.text)).toEqual(["决策甲"]);
+    gate.park({ text: "决策乙", supersedesId: 1, supersededText: "决策甲" }, null);
+    await gate.fire();
+    const rows = store.getDecisions("s1");
+    expect(rows.find((d) => d.text === "决策甲")?.status).toBe("superseded");
+    expect(rows.find((d) => d.text === "决策乙")?.status).toBe("active");
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
