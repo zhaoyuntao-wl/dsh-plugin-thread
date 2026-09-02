@@ -90,7 +90,13 @@ end to end.
 
 ```sh
 dsh plugin add dsh-thread
+dsh plugin add dsh-thread@latest   # 升级：同命令重装最新版（core 经 ^1.0.0 依赖自动跟随）
 ```
+
+The plugin pulls its kernel (`@thread-memory/core`) through a `^1.0.0` range,
+so new installs and re-adds pick up the latest core automatically. The runtime
+logs the resolved core version at startup (`[dsh-thread] thread core vX.Y.Z`)
+and the embedded MCP server reports it in its handshake.
 
 All dsh plugins must be referenced in a profile's `bundles` to take effect. In
 `~/.dsh/profiles/<your-profile>/package.json`:

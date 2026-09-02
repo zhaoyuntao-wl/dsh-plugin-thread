@@ -25,6 +25,7 @@ import {
   sedimentClosingTodos,
   THREAD_BEHAVIOR_CONTRACT,
   THREAD_NORTH_STAR,
+  THREAD_VERSION,
 } from '@thread-memory/core'
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -756,6 +757,8 @@ export function buildToolCallMeta(name: string, callId: string, argumentsRaw: st
 }
 
 export function apply(ctx: Context, config: Config) {
+  // 版本可见性（2026-09-02）：启动报真实 core 版本，排障/升级时一眼可查
+  console.log(`[dsh-thread] thread core v${THREAD_VERSION}`)
   // MAX v3 批 0 探针（env 门控，spike 专用；正常会话 THREAD_B0_PROBE 未设 = 零行为差异）
   if (process.env.THREAD_B0_PROBE === '1') {
     runBatch0Probes(ctx, {
