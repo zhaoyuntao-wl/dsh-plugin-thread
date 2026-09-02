@@ -13,10 +13,16 @@ end to end.
 - **Structural delivery, three triggers** — a first-turn anchor (project identity
   + behavior contract + status card), a re-anchor after every compaction, and a
   cross-agent state delta at every turn boundary. No per-turn card noise.
+  The design follows the deterministic-log line of memory research
+  (e.g. arXiv:2605.21997 “The Log is the Agent”); the compaction re-anchor
+  targets the “Compaction Cliff” failure mode (arXiv:2608.22752).
 - **Native query tool** — `query_session_memory` registered through
   `ctx.tools.register` into the model's tool schema, with filesystem-style
   navigation `ls` / `cd` / `cat` / `grep`. The embedded MCP server remains as a
-  fallback channel.
+  fallback channel. Retrieval is deterministic BM25 over the lossless stream
+  (jieba word segmentation for Chinese) with citation pull-back — no embedding
+  dependency by default; a hybrid layer can be added at the integration
+  boundary (evaluated against the BM25 baseline on the eval suite, not bundled).
 - **Behavior-contract skill** — a `thread` skill is registered into the base's
   skill catalog ("need details → call the tool") and injected at anchors, so the
   model does not rely on memory to know it has memory.
@@ -51,7 +57,8 @@ end to end.
 - **Resource cleanup** — `/thread-rev <ast|dec|fdb|gol> <ids|all>` revokes
   registrations: decisions/preferences/assets are deleted (the event stream
   keeps the text), goals are abandoned through the state machine with their
-  todos self-healed.
+  todos self-healed. Every structured row carries a visible `#id` on the status
+  card, so memory stays human-editable end to end.
 - **Session isolation** — `/thread-iso` / `/thread-uniso`, and
   `/thread-pub <ast|dec|fdb|gol> <ids|all>` shares rows produced while isolated.
 - **Optional active compaction** — with `THREAD_AUTO_COMPACT=1` the plugin
@@ -62,6 +69,11 @@ end to end.
   `THREAD_B0_PROBE=1` is set, so normal sessions are unaffected.
 
 ## Supported dsh versions
+
+- **Local-first, no daemon** — everything runs in-process: embedded SQLite
+  stores, no background service, no cloud dependency. Headless and web profiles
+  of the same machine share the same store, and offline sessions behave
+  identically.
 
 - **Verified**: dsh **0.1.1-rc.2** (current; the dsh CLI and its SDK packages
   ship version-locked). **0.1.0-rc.6** also works (the earlier dogfood
