@@ -8,19 +8,20 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 ## 功能
 
 - **无损采集**——订阅 `session/event`，完整事件流水落双 SQLite 库，稳定 origin 幂等去重。
-- **三触发结构性送达**——首轮锚定（项目身份 + 行为契约 + 状态卡）、每次压缩后重锚定、每回合边界的跨代理状态增量。无每轮状态卡噪音。
-- **原生查询工具**——`query_session_memory` 经 `ctx.tools.register` 注册进模型工具面，支持文件系统式导航 `ls` / `cd` / `cat` / `grep`；内嵌 MCP server 保留为回退通道。
+- **三触发结构性送达**——首轮锚定（项目身份 + 行为契约 + 状态卡）、每次压缩后重锚定、每回合边界的跨代理状态增量。无每轮状态卡噪音。设计沿确定性日志的记忆研究方向（如 arXiv:2605.21997《The Log is the Agent》）；压缩重锚定针对「Compaction Cliff」失效模式（arXiv:2608.22752）。
+- **原生查询工具**——`query_session_memory` 经 `ctx.tools.register` 注册进模型工具面，支持文件系统式导航 `ls` / `cd` / `cat` / `grep`；内嵌 MCP server 保留为回退通道。检索为无损流水上的确定性 BM25（中文 jieba 分词）+ 引用回拉——默认零 embedding 依赖；可在集成边界加 hybrid 层（以回归集对照 BM25 基线评估，不打包）。
 - **行为契约技能**——`thread` 技能注册进底座技能目录（"需要细节就调工具"）并在锚点注入，模型不必"记得自己有记忆"。
 - **产出识别**——write/edit 类工具写出的 markdown 文档在写时登记为产出并建血缘边；`/thread-reg ast` 覆盖显式登记。
 - **决策与偏好的显式通道**——决策经 `/thread-reg dec`（用户，`--supersedes <id>` 演化取代链）或模型的 `record_decision` 工具（行为契约指示模型：用户定案或自己落定决策时调用）记录；偏好/教训经 `/thread-reg fdb` 记录（"不要/别"句式自动分类为教训）。决策/偏好的自然语言判定已停用——文本启发式零误报；未显式记录的仍留在事件流水可回拉（目标判定与完成判定保留，带多行粘贴守卫）。
 - **收尾沉淀 + 收件箱**——收尾词把进行中目标沉淀为待办；`/thread-cfm` 是唯一待处理收件箱：待办（`t#id`）与候选（`c#id`）一个视图——`do` 完成/转正（候选可带修正文本）、`cnl` 丢弃、`cnl all` 双清。状态卡展示前几条候选，杜绝无声堆积。
 - **行为边界（1.0，直说）**——候选不会自动产出：决策/偏好的自然语言判定已停用，`c#` 条目只会显示存量遗留，直到发布后的抽取层上线；待办相反有活跃产出（收尾沉淀 + 目标完成自愈）。决策不会自行过期——时间性决策用 `--supersedes` 显式收口。目标完成判定偏保守（非 ASCII ≥4 连字符 / 纯 ASCII ≥8 连字符重叠；短英文目标宁漏勿误，用 `/thread-rev gol` 废弃）。完整清单见 [Thread README](https://github.com/zhaoyuntao-wl/Thread) 的「诚实边界」一节。
-- **资源解除**——`/thread-rev <ast|dec|fdb|gol> <ids|all>` 解除注册：决策/偏好/产出删除（事件流水保留原文）、目标走状态机废弃并同步自愈关联待办。
+- **资源解除**——`/thread-rev <ast|dec|fdb|gol> <ids|all>` 解除注册：决策/偏好/产出删除（事件流水保留原文）、目标走状态机废弃并同步自愈关联待办。每条结构化行在状态卡上带可见 `#id`，记忆全程可人工编辑。
 - **会话隔离**——`/thread-iso` / `/thread-uniso`；`/thread-pub <ast|dec|fdb|gol> <ids|all>` 把隔离期产生的行转共享。
 - **可选主动压缩**——`THREAD_AUTO_COMPACT=1` 时插件在回合边界监控 token 压力并静默触发 `compactNow`；无论哪种方式压缩，状态都会在压缩后重锚定。
 
 ## 支持的 dsh 版本
 
+- **本地优先、零常驻**——一切进程内运行：内嵌 SQLite 存储、无后台服务、无云端依赖。同机 web/headless profile 共享同一存储，离线会话行为一致。
 - **已验证**：dsh **0.1.1-rc.2**（当前；dsh CLI 与其 SDK 包同版锁步发布）。**0.1.0-rc.6** 亦可用（早期狗粮基线）但不推荐。
 - 插件钉 SDK peer `^0.1.1-rc.2`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；0.1.x 内升级预期兼容，每次升级经隔离契约探针 + CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
 - 未来大版本（0.2+）不做承诺；每个新 dsh 版本经评估并扩展 matrix 后才声明支持。
@@ -29,7 +30,10 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 
 ```sh
 dsh plugin add dsh-thread
+dsh plugin add dsh-thread@latest   # 升级：同命令重装最新版（core 经 ^1.0.0 依赖自动跟随）
 ```
+
+插件经 `^1.0.0` 区间拉取内核（`@thread-memory/core`），新装与重装自动拿到最新 core；运行时启动日志报告解析到的 core 版本（`[dsh-thread] thread core vX.Y.Z`），内嵌 MCP server 亦在其握手中报告。
 
 dsh 插件需在 profile 的 `bundles` 中引用才生效。在
 `~/.dsh/profiles/<your-profile>/package.json`：
