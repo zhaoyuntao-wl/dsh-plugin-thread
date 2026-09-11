@@ -48,13 +48,14 @@ jobs:
         run: pnpm test
 
   # dsh-thread compat matrix (release gate: pin + adapt to the dsh release
-  # train). Append new dsh versions here as previews land; verifies compile-time
-  # API compatibility. Same dev-mode guard as check (core must be on npm first).
+  # train). Append new dsh versions here as previews land; the step below
+  # installs that exact SDK version before typechecking, so this job really
+  # compiles against the matrix entry rather than the lockfile's resolution.
   compat-dsh:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dsh-version: [0.1.0-rc.6, 0.1.1-rc.2]
+        dsh-version: [0.1.5-rc.1, 0.1.5-rc.2]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -76,6 +77,17 @@ jobs:
       - name: Install
         if: steps.dev-mode.outputs.dev-mode == '0'
         run: pnpm install --frozen-lockfile
+      - name: Pin SDK to the matrix dsh version
+        if: steps.dev-mode.outputs.dev-mode == '0'
+        run: |
+          pnpm add -D --save-exact \
+            "@deepseek-ai/dsh-agent@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-llm@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-session@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-tools@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-user-questions@${DSH_VERSION}"
+        env:
+          DSH_VERSION: ${{ matrix.dsh-version }}
       - name: Build
         if: steps.dev-mode.outputs.dev-mode == '0'
         run: pnpm build

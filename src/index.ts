@@ -100,8 +100,12 @@ export function isOwnInjection(messages: readonly unknown[]): boolean {
   })
 }
 
-// dsh 压缩 checkpoint 摘要来源标记（官方 @deepseek-ai/dsh-compaction checkpoint 契约：
-// COMPACT_CHECKPOINT_MARKER = { kind: 'plugin', plugin: 'compact' }，跨包钉死，renaming 即编译错）
+// dsh 压缩 checkpoint 摘要来源标记（官方 @deepseek-ai/dsh-compaction checkpoint 契约）。
+// 2026-09-11 类型探针更正：此前注释称"跨包钉死、renaming 即编译错"——不成立。该标记在官方包内
+// 是模块私有的（未导出 COMPACT_CHECKPOINT_MARKER，也未随类型导出），公共契约是
+// compactCheckpointSource() / isCompactCheckpointSource()。故此处是逐字复制的字符串常量，
+// 官方改名不会编译报错，只能靠升级探针的 live 形状验证兜底（0.1.1-rc.2 → 0.1.5-rc.2 间
+// checkpoint.d.ts 逐字节相同，暂未变）。
 const COMPACT_CHECKPOINT_SOURCE_PLUGIN = 'compact'
 
 // 识别 dsh 压缩 checkpoint 摘要消息（source.plugin === 'compact'，官方 @deepseek-ai/dsh-compaction 契约）。

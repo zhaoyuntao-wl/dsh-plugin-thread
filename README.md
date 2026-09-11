@@ -75,10 +75,10 @@ end to end.
   of the same machine share the same store, and offline sessions behave
   identically.
 
-- **Verified**: dsh **0.1.1-rc.2** (current; the dsh CLI and its SDK packages
-  ship version-locked). **0.1.0-rc.6** also works (the earlier dogfood
-  baseline) but is not recommended.
-- The plugin pins its SDK peers to `^0.1.1-rc.2`
+- **Verified**: dsh **0.1.5-rc.1** (current; the dsh CLI and its SDK packages
+  ship version-locked — the 0.1.5-rc.1 CLI resolves its SDK sub-packages to
+  0.1.5-rc.2). **0.1.1-rc.2**, the previous baseline, is no longer declared.
+- The plugin pins its SDK peers to `^0.1.5-rc.1`
   (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`); within the
   0.1.x train, upgrades are expected to be compatible and are verified by an
   isolated contract probe plus the CI compat matrix

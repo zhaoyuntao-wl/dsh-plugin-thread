@@ -22,8 +22,8 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 ## 支持的 dsh 版本
 
 - **本地优先、零常驻**——一切进程内运行：内嵌 SQLite 存储、无后台服务、无云端依赖。同机 web/headless profile 共享同一存储，离线会话行为一致。
-- **已验证**：dsh **0.1.1-rc.2**（当前；dsh CLI 与其 SDK 包同版锁步发布）。**0.1.0-rc.6** 亦可用（早期狗粮基线）但不推荐。
-- 插件钉 SDK peer `^0.1.1-rc.2`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；0.1.x 内升级预期兼容，每次升级经隔离契约探针 + CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
+- **已验证**：dsh **0.1.5-rc.1**（当前；dsh CLI 与其 SDK 包同版锁步发布——0.1.5-rc.1 的子包解析到 0.1.5-rc.2）。上一基线 **0.1.1-rc.2** 不再声明支持。
+- 插件钉 SDK peer `^0.1.5-rc.1`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；0.1.x 内升级预期兼容，每次升级经隔离契约探针 + CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
 - 未来大版本（0.2+）不做承诺；每个新 dsh 版本经评估并扩展 matrix 后才声明支持。
 
 ## 安装
