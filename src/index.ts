@@ -12,8 +12,6 @@ import {
   buildStatusCard,
   classifyReportEvent,
   classifyWriteEvent,
-  defaultPaths,
-  deriveProjectKey,
   detectGoalCompletion,
   detectSituation,
   extractTitleFromContent,
@@ -23,14 +21,16 @@ import {
   renderStateDelta,
   runQueryTool,
   sedimentClosingTodos,
+  threadRoot,
   THREAD_BEHAVIOR_CONTRACT,
   THREAD_NORTH_STAR,
   THREAD_VERSION,
 } from '@thread-memory/core'
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { appendFileSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { runBatch0Probes } from './batch0-probe.js'
+import { createSessionScopes } from './scope.js'
 import {
   THREAD_SOURCE_KIND,
   isCompactCheckpointSource,
@@ -449,7 +449,7 @@ interface CommandRuntimeLike {
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
 function registerThreadCommands(
   ctx: Context,
-  deps: { openStore: () => ThreadStore; projectKey: string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
+  deps: { storeFor: (sessionId: string) => ThreadStore; projectKeyOf: (sessionId: string) => string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
 ): void {
   const commands = ctx.get?.('commands') as CommandRuntimeLike | undefined
   if (!commands) {
@@ -483,9 +483,9 @@ function registerThreadCommands(
     if (!cmd) {
       return '[Thread] 用法：/thread-reg <ast|dec|fdb|gol>（列该资源）或 /thread-reg <ast|dec|fdb|gol> <text>（dec 支持 --supersedes <id>）'
     }
-    const s = deps.openStore()
+    const s = deps.storeFor(sid)
     let text = ''
-    handleRegCommand(s, sid, cmd, { projectKey: deps.projectKey, isolation: s.getSessionIsolation(sid), cwd: process.cwd(), busyRetries: deps.busyRetries, busyRetryDelayMs: deps.busyRetryDelayMs, onMutate: () => deps.refreshCard(sid) }, (t) => {
+    handleRegCommand(s, sid, cmd, { projectKey: deps.projectKeyOf(sid), isolation: s.getSessionIsolation(sid), cwd: process.cwd(), busyRetries: deps.busyRetries, busyRetryDelayMs: deps.busyRetryDelayMs, onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
     })
     return text
@@ -497,7 +497,7 @@ function registerThreadCommands(
     if (!cmd) {
       return '[Thread] 用法：/thread-rev <ast|dec|fdb|gol>（列该资源）或 /thread-rev <ast|dec|fdb|gol> <ids|all>'
     }
-    const s = deps.openStore()
+    const s = deps.storeFor(sid)
     let text = ''
     handleRevCommand(s, sid, cmd, { onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
@@ -511,9 +511,9 @@ function registerThreadCommands(
     if (!cmd) {
       return '[Thread] 用法：/thread-cfm（无参列收件箱）或 /thread-cfm <do|cnl> <t#id|c#id>（cnl all 全清；无前缀数字无法定位）'
     }
-    const s = deps.openStore()
+    const s = deps.storeFor(sid)
     let text = ''
-    handleCfmCommand(s, sid, cmd, { projectKey: deps.projectKey }, (t) => {
+    handleCfmCommand(s, sid, cmd, { projectKey: deps.projectKeyOf(sid) }, (t) => {
       text = t
     })
     return text
@@ -525,7 +525,7 @@ function registerThreadCommands(
     if (!cmd) {
       return '[Thread] 用法：/thread-pub（无参列全部隔离行）或 /thread-pub <ast|dec|fdb|gol>（列该资源）| <ast|dec|fdb|gol> <ids|all>'
     }
-    const s = deps.openStore()
+    const s = deps.storeFor(sid)
     let text = ''
     handlePubCommand(s, sid, cmd, { onMutate: () => deps.refreshCard(sid) }, (t) => {
       text = t
@@ -535,14 +535,14 @@ function registerThreadCommands(
 
   reg('thread-iso', '隔离本会话（上下文对其他代理不可见，工具事实仍共享）', '', (inv) => {
     const sid = sessionIdOf(inv)
-    deps.openStore().setSessionIsolation(sid, true)
+    deps.storeFor(sid).setSessionIsolation(sid, true)
     deps.refreshCard(sid)
     return '[Thread] 本会话已隔离。'
   })
 
   reg('thread-uniso', '解除本会话隔离', '', (inv) => {
     const sid = sessionIdOf(inv)
-    deps.openStore().setSessionIsolation(sid, false)
+    deps.storeFor(sid).setSessionIsolation(sid, false)
     deps.refreshCard(sid)
     return '[Thread] 本会话已解除隔离。'
   })
@@ -555,7 +555,7 @@ export function handleRegCommand(
   store: ThreadStore,
   sessionId: string,
   cmd: RegCommand,
-  opts: { projectKey?: string; isolation?: boolean; cwd?: string; busyRetries?: number; busyRetryDelayMs?: number; onMutate?: () => void },
+  opts: { projectKey?: string; isolation?: boolean; cwd?: string; sourceEvent?: number; busyRetries?: number; busyRetryDelayMs?: number; onMutate?: () => void },
   respond: (text: string) => void,
 ): void {
   if (cmd.action === 'list') {
@@ -583,14 +583,14 @@ export function handleRegCommand(
   }
   if (resource === 'dec') {
     if (cmd.supersedesId !== undefined) {
-      const r = store.supersedeDecisionById(sessionId, cmd.supersedesId, text)
+      const r = store.supersedeDecisionById(sessionId, cmd.supersedesId, text, { sourceEvent: opts.sourceEvent })
       respond(r
         ? `[Thread] 已记录决策 #${r.replacement.id}（取代 #${r.superseded.id}）。`
         : `[Thread] #${cmd.supersedesId} 不存在、非本会话或已失效。`)
       if (r) opts.onMutate?.()
       return
     }
-    const d = store.addDecision(sessionId, text, { projectKey: opts.projectKey, isolation: opts.isolation })
+    const d = store.addDecision(sessionId, text, { projectKey: opts.projectKey, isolation: opts.isolation, sourceEvent: opts.sourceEvent })
     respond(`[Thread] 已记录决策 #${d.id}。`)
     opts.onMutate?.()
     return
@@ -767,21 +767,22 @@ export function apply(ctx: Context, config: Config) {
   const compactPressureTokens = config.compactPressureTokens ?? 0
   const candidateTtlDays = config.candidateTtlDays ?? 14
   const confirmDecisions = config.confirmDecisions ?? 'auto'
-  const cwd = process.env.THREAD_CWD ?? process.cwd()
-  const projectKey = deriveProjectKey(cwd)
-  const paths = defaultPaths(cwd)
-  mkdirSync(dirname(paths.eventsDbPath), { recursive: true })
-  mkdirSync(dirname(paths.structuredDbPath), { recursive: true })
-
-  let store: ThreadStore | undefined
-
-  function openStore(): ThreadStore {
-    if (store) {
-      return store
-    }
-    store = new ThreadStore({ eventsPath: paths.eventsDbPath, structuredPath: paths.structuredDbPath, projectKey })
-    return store
-  }
+  // 项目键解析（2026-10-07 D1 修复）：跟随**会话工作区**（dsh Session.meta.cwd），不再取进程 cwd——
+  // 一个 dsh 进程服务的多工作区会话曾共用同一个桶（跨工作区串桶 + 同会话历史跨桶劈裂）。
+  // 解析与"按 key 缓存库"的逻辑收口在 scope.ts（可单测）；agents 注册表在后面声明，故用惰性回调。
+  const fallbackCwd = process.env.THREAD_CWD ?? process.cwd()
+  const threadDir = threadRoot()
+  const scopes = createSessionScopes({
+    root: threadDir,
+    fallbackCwd,
+    lookupAgent: (sessionId) => agents?.get(sessionId) as { session?: unknown } | undefined,
+  })
+  const rememberSession = (session: unknown): void => scopes.remember(session)
+  const projectKeyForSession = (session: unknown): string => scopes.keyForSession(session)
+  const projectKeyOf = (sessionId: string): string => scopes.keyOf(sessionId)
+  const storeFor = (key: string): ThreadStore => scopes.storeFor(key)
+  const openStore = (sessionId?: string): ThreadStore =>
+    sessionId ? scopes.storeFor(scopes.keyOf(sessionId)) : scopes.storeFor(scopes.fallbackKey())
 
   // 代理注册表：事件驱动的响应注入（/thread-pending 回执）经 agents.get(sessionId).inject
   interface AgentsRegistryLike {
@@ -815,7 +816,8 @@ export function apply(ctx: Context, config: Config) {
   // situation normal（与首轮锚点卡同构）；失败降级只记日志，不阻塞命令回执。
   function injectStatusCardRefresh(sessionId: string, prefix = '[Thread 状态卡刷新]'): void {
     try {
-      const s = openStore()
+      const projectKey = projectKeyOf(sessionId)
+      const s = storeFor(projectKey)
       const card = buildStatusCard(s, {
         sessionId,
         projectKey,
@@ -847,7 +849,7 @@ export function apply(ctx: Context, config: Config) {
       return undefined
     }
   }
-  const gateLogPath = join(dirname(paths.structuredDbPath), 'gate-debug.log')
+  const gateLogPath = join(threadDir, 'gate-debug.log')
   function gateLog(message: string): void {
     console.error(message)
     try {
@@ -857,6 +859,14 @@ export function apply(ctx: Context, config: Config) {
     }
   }
   const decisionGates = new Map<string, DecisionGateSession>()
+  // 决策行溯源锚（2026-10-07 论坛反馈同源缺口修复）：确认门与 /thread-reg 通道此前不传 source_event，
+  // 这些决策行渲染出来**没有**（源#eN）——"截断 + 无锚"同时出现时，模型只剩行首 #id 一条线索。
+  // 锚点 = 本会话最近一次 record_decision 工具调用事件（工具调用先于落库被采集）。
+  const decisionCallEvents = new Map<string, number>()
+
+  function decisionAnchor(sessionId: string): number | undefined {
+    return decisionCallEvents.get(sessionId)
+  }
 
   function gateFor(sessionId: string, agent: unknown): DecisionGateSession {
     let gate = decisionGates.get(sessionId)
@@ -865,7 +875,8 @@ export function apply(ctx: Context, config: Config) {
       gateLog(`decision gate: created session=${sessionId} uq=${!!uq}`)
       gate = new DecisionGateSession(uq, agent, {
         write: (entry) => {
-          const s = openStore()
+          const projectKey = projectKeyOf(sessionId)
+          const s = storeFor(projectKey)
           return writeGateDecision(s, sessionId, entry, {
             projectKey,
             isolation: s.getSessionIsolation(sessionId),
@@ -878,7 +889,8 @@ export function apply(ctx: Context, config: Config) {
           if (notes.length > 0) {
             // 意见持久化（2026-08-25 用户定案）：原样落事件流水，query_session_memory 可查回
             try {
-              const s = openStore()
+              const projectKey = projectKeyOf(sessionId)
+              const s = storeFor(projectKey)
               withBusyRetry(() => appendGateAnnotations(s, sessionId, dropped, {
                 projectKey,
                 isolation: s.getSessionIsolation(sessionId),
@@ -922,8 +934,11 @@ export function apply(ctx: Context, config: Config) {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    execute: async (args) => {
-      const result = runQueryTool(openStore(), {
+    execute: async (args, exec) => {
+      // 查询通道也按会话作用域取库（与 D2 同源：工具不带会话会落到进程 cwd 的桶）
+      const execSession = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+      rememberSession(execSession)
+      const result = runQueryTool(execSession ? storeFor(projectKeyForSession(execSession)) : openStore(), {
         query: args.query,
         nav: args.nav,
         target: args.target,
@@ -946,7 +961,7 @@ export function apply(ctx: Context, config: Config) {
   // supersedes_id 可选：跨会话接续时取代旧决策（id 从状态卡/决策列表/query_session_memory 获取）。
   const disposeRecordTool = ctx.tools.register(defineTool({
     name: 'record_decision',
-    description: '把用户定案或你做出的影响后续的决策记录为 Thread 正式决策（决策链）。用户拍板方案、你确定采用某做法、或用户说"就按X"时调用；一条调用记一条决策，text = 决策本身（不带论证）。登记后需用户在弹窗确认才生效（确认前不算已记录，报告为待确认）；无弹窗环境自动确认。',
+    description: '把用户定案或你做出的影响后续的决策记录为 Thread 正式决策（决策链）。用户拍板方案、你确定采用某做法、或用户说"就按X"时调用；一条调用记一条决策，text = 决策本身（不带论证），先写适用条件/例外、再写动作（条件在句首，卡片截断时也读得懂）。登记后需用户在弹窗确认才生效（确认前不算已记录，报告为待确认）；无弹窗环境自动确认。',
     parameters: {
       text: { type: 'string', description: '决策文本（一句话，不含论证过程）' },
       supersedes_id: { type: 'integer', description: '可选：被本决策取代的旧决策 id（查询状态卡/决策列表后确定）' },
@@ -956,7 +971,10 @@ export function apply(ctx: Context, config: Config) {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     execute: async (args, exec) => {
-      const s = openStore()
+      const execSession = exec.agent?.session
+      rememberSession(execSession)
+      const projectKey = execSession ? projectKeyForSession(execSession) : scopes.fallbackKey()
+      const s = storeFor(projectKey)
       const sid = String(exec.agent?.session?.id ?? s.getRecentSessionId() ?? '')
       const text = String(args.text ?? '').trim().slice(0, 200)
       if (!text) {
@@ -970,7 +988,7 @@ export function apply(ctx: Context, config: Config) {
           ? s.getDecisions(sid).find((d) => d.id === supersedesId)?.text
           : undefined
         const gate = gateFor(sid, exec.agent)
-        gate.park({ text, supersedesId, supersededText }, exec.agent)
+        gate.park({ text, supersedesId, supersededText, sourceEvent: decisionAnchor(sid) }, exec.agent)
         gateLog(`decision gate: parked session=${sid} supersedes=${supersedesId ?? 'none'}`)
         // 立即弹（工具执行轮内时机，与 ask_user_question 同通道已实证可用）；
         // fire-and-forget 不阻塞本轮回答；失败由 turn/end / 下个 pre-step 兜底重试
@@ -978,14 +996,15 @@ export function apply(ctx: Context, config: Config) {
         return `[Thread] 决策已登记待确认：${text.slice(0, 60)}。本轮回答结束后弹窗请你确认，确认后生效；取消或未确认则丢弃。`
       }
       const isolation = s.getSessionIsolation(sid)
+      const sourceEvent = decisionAnchor(sid)
       if (supersedesId !== undefined) {
-        const r = s.supersedeDecisionById(sid, supersedesId, text)
+        const r = s.supersedeDecisionById(sid, supersedesId, text, { sourceEvent })
         if (r) injectStatusCardRefresh(sid)
         return r
           ? `[Thread] 已记录决策 #${r.replacement.id}（取代 #${r.superseded.id}）。`
           : `[Thread] record_decision：决策 #${supersedesId} 不存在、非本会话或已失效，未记录。`
       }
-      const d = s.addDecision(sid, text, { projectKey, isolation })
+      const d = s.addDecision(sid, text, { projectKey, isolation, sourceEvent })
       injectStatusCardRefresh(sid)
       return `[Thread] 已记录决策 #${d.id}：${text.slice(0, 60)}`
     },
@@ -1014,7 +1033,7 @@ export function apply(ctx: Context, config: Config) {
   // dsh 真命令注册（2026-08-20 用户定：命令发现性不能只靠 README/状态卡——状态卡面向模型）。
   // ctx.commands.register → 命令面板/斜杠补全/直接执行（不经模型一轮）；handler 返回文本由 UI 直接呈现。
   // 消息白名单解析保留为回退（headless / 无命令 UI 的底座；web 命令被命令系统拦截不会到达 user/message，无双触发）。
-  registerThreadCommands(ctx, { openStore, projectKey, busyRetries, busyRetryDelayMs, refreshCard: injectStatusCardRefresh })
+  registerThreadCommands(ctx, { storeFor, projectKeyOf, busyRetries, busyRetryDelayMs, refreshCard: injectStatusCardRefresh })
 
   // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）。
   // 官方 ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined；
@@ -1026,7 +1045,8 @@ export function apply(ctx: Context, config: Config) {
         if (typeof sessionId !== 'string' && typeof sessionId !== 'number') {
           return undefined
         }
-        const s = openStore()
+        const projectKey = projectKeyOf(String(sessionId))
+        const s = storeFor(projectKey)
         const rows = s.getFeedbackMerged(String(sessionId), projectKey, feedbackRows)
         const hit = matchToolFeedback(rows, execution.name)
         if (hit) {
@@ -1039,14 +1059,18 @@ export function apply(ctx: Context, config: Config) {
     })
     return () => {
       disposeGuard()
-      store?.close()
+      scopes.closeAll()
     }
   })
 
   // 采集：session/event 订阅 → Thread 事件（origin 幂等，SQLITE_BUSY 重试）
   ctx.on('session/event', (session: Session, event: SessionEvent) => {    try {
-      const s = openStore()
+      rememberSession(session)
+      const projectKey = projectKeyForSession(session)
+      const s = storeFor(projectKey)
       const sessionId = String(session.id)
+      // 命令里的相对路径按**会话工作区**解析（同源修复：进程 cwd 可能是别的目录）
+      const sessionCwd = (session as unknown as { meta?: { cwd?: string } }).meta?.cwd ?? fallbackCwd
       // 压缩边界 → compact_checkpoint（§1.5 情境 C：post-compact 判定依赖此事件）。
       // dsh 压缩事务事件顺序 = compaction/start → compaction/summary → user/message(checkpoint 摘要) → compaction/end；
       // 此前四类全落 default 分支被丢弃 → post-compact 情境在 dsh 上从未触发（2026-08-18 修复）。
@@ -1153,7 +1177,7 @@ export function apply(ctx: Context, config: Config) {
           if (isNonUserInjection(source as { kind?: string; plugin?: string; form?: string }, body)) {
             try {
               appendFileSync(
-                join(dirname(paths.structuredDbPath), 'capture-debug.log'),
+                join(threadDir, 'capture-debug.log'),
                 `${new Date().toISOString()} ${JSON.stringify(source)} | ${body.slice(0, 60).replace(/\s+/g, ' ')}\n`,
               )
             } catch {
@@ -1208,7 +1232,7 @@ export function apply(ctx: Context, config: Config) {
           // 命令执行（2026-08-21 重构）：回执经事件驱动注入（queueMicrotask 防 append 重入）
           const regCmd = parseRegCommand(body)
           if (regCmd) {
-            handleRegCommand(s, sessionId, regCmd, { projectKey, isolation: after, cwd, busyRetries, busyRetryDelayMs, onMutate: () => injectStatusCardRefresh(sessionId) }, (text) => injectFromEvent(sessionId, text))
+            handleRegCommand(s, sessionId, regCmd, { projectKey, isolation: after, cwd: sessionCwd, sourceEvent: appended.id, busyRetries, busyRetryDelayMs, onMutate: () => injectStatusCardRefresh(sessionId) }, (text) => injectFromEvent(sessionId, text))
           }
           const revCmd = parseRevCommand(body)
           if (revCmd) {
@@ -1250,6 +1274,10 @@ export function apply(ctx: Context, config: Config) {
             body: `${event.data.name} 调用参数：${String(argumentsRaw).slice(0, 2000)}`,
             meta: buildToolCallMeta(event.data.name, event.data.callId, argumentsRaw),
           }, { projectKey, origin: `dsh://tool#${event.data.callId}` }, busyRetries, busyRetryDelayMs)
+          // 决策溯源锚（2026-10-07）：记住本会话最近一次 record_decision 调用事件，供确认门/命令通道落库时带锚
+          if (event.data.name === 'record_decision') {
+            decisionCallEvents.set(sessionId, appended.id)
+          }
           // 产出识别（0.2）：文档/报告产出 → knowledge_assets 登记 + produces/references 写时建边。
           // 失败降级：登记异常只记日志不阻塞采集主路径（旁路可失败原则）
           const classification = classifyWriteEvent(event.data.name, argumentsRaw) ?? classifyReportEvent(event.data.name, argumentsRaw, event.data.callId)
@@ -1299,7 +1327,8 @@ export function apply(ctx: Context, config: Config) {
       decisionGates.delete(String(session.id))
     }
     try {
-      const s = openStore()
+      const projectKey = projectKeyForSession(session)
+      const s = storeFor(projectKey)
       const sid = String(session.id)
       sedimentClosingTodos(s, sid, {
         projectKey,
@@ -1331,7 +1360,10 @@ export function apply(ctx: Context, config: Config) {
     if (injectedTurns.has(turn)) return next()
     injectedTurns.add(turn)
     try {
-      const s = openStore()
+      const agentSession = payload.agent.session
+      rememberSession(agentSession)
+      const projectKey = projectKeyForSession(agentSession)
+      const s = storeFor(projectKey)
       const sessionId = payload.agent.session?.id ?? ''
       // G5 跨会话 delta（2.3.2）：回合边界水位判定，他代理有新决策/目标/偏好/候选变更才注入
       if (sessionId && !s.getSessionIsolation(String(sessionId))) {        try {
@@ -1548,6 +1580,8 @@ export interface PendingDecisionEntry {
   text: string
   supersedesId?: number
   supersededText?: string
+  /** 溯源锚：登记该决策的 dsh 事件 id（渲染为（源#eN），模型可 cat 回原文） */
+  sourceEvent?: number
 }
 
 export interface DecisionWriteResult {
@@ -1603,10 +1637,10 @@ export function writeGateDecision(
   opts: { projectKey?: string; isolation?: boolean },
 ): DecisionWriteResult | undefined {
   if (entry.supersedesId !== undefined) {
-    const r = store.supersedeDecisionById(sessionId, entry.supersedesId, entry.text)
+    const r = store.supersedeDecisionById(sessionId, entry.supersedesId, entry.text, { sourceEvent: entry.sourceEvent })
     return r ? { id: r.replacement.id, supersededId: r.superseded.id } : undefined
   }
-  const d = store.addDecision(sessionId, entry.text, { projectKey: opts.projectKey, isolation: opts.isolation })
+  const d = store.addDecision(sessionId, entry.text, { projectKey: opts.projectKey, isolation: opts.isolation, sourceEvent: entry.sourceEvent })
   return { id: d.id }
 }
 
