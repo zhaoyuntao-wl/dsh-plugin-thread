@@ -1,4 +1,11 @@
 import { describe, expect, it } from "vitest";
+// 主入口需一并加载：官方 'compact-checkpoint' 的 MessageSourceMap 声明合并挂在包主入口，
+// 只引 /checkpoint 子路径时官方谓词的参数类型不认识该来源。
+import type {} from "@deepseek-ai/dsh-compaction";
+import {
+  compactCheckpointSource,
+  isCompactCheckpointSource as sdkIsCompactCheckpointSource,
+} from "@deepseek-ai/dsh-compaction/checkpoint";
 import { handleCompactionSummary, isCompactCheckpointSource } from "./index.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -108,14 +115,27 @@ describe("handleCompactionSummary（压缩边界 → compact_checkpoint，2026-0
 });
 
 describe("isCompactCheckpointSource（识别 dsh 压缩摘要 user/message）", () => {
-  it("plugin=compact → true（跳过重复采集）", () => {
-    expect(isCompactCheckpointSource({ kind: "plugin", plugin: "compact" })).toBe(true);
+  it("kind=compact-checkpoint → true（跳过重复采集；0.2.0 起官方 marker）", () => {
+    expect(isCompactCheckpointSource({ kind: "compact-checkpoint" })).toBe(true);
   });
-  it("plugin=dsh-thread（自身注入）→ false（走 PLUGIN_NAME 判定）", () => {
-    expect(isCompactCheckpointSource({ kind: "plugin", plugin: "dsh-thread" })).toBe(false);
+  it("kind=dsh-thread（自身注入）→ false（走 isOwnInjection 判定）", () => {
+    expect(isCompactCheckpointSource({ kind: "dsh-thread" })).toBe(false);
   });
   it("普通用户来源 → false", () => {
     expect(isCompactCheckpointSource({ kind: "user" })).toBe(false);
     expect(isCompactCheckpointSource(undefined)).toBe(false);
+  });
+});
+
+// 官方谓词交叉验证（2026-10-07 升级 0.2.0 补）：本插件的 checkpoint 常量是逐字复制（不引 dsh-compaction
+// 运行时依赖）；官方改名时本用例变红，而不是静默失配（09-11 探针遗留的"只能靠 live 形状兜底"缺口）。
+describe("与官方 @deepseek-ai/dsh-compaction 谓词一致", () => {
+  it("compactCheckpointSource() 的产物同时被官方谓词与本地谓词识别", () => {
+    const source = compactCheckpointSource("probe-compaction" as never);
+    expect(sdkIsCompactCheckpointSource(source)).toBe(true);
+    expect(isCompactCheckpointSource(source as unknown as { kind?: string })).toBe(true);
+  });
+  it("用户来源不被官方谓词误判（对照）", () => {
+    expect(sdkIsCompactCheckpointSource({ kind: "user" } as never)).toBe(false);
   });
 });

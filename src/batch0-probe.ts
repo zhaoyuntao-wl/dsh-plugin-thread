@@ -8,10 +8,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ThreadStore, defaultPaths, deriveProjectKey } from '@thread-memory/core'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { B0_DRILL_SOURCE_KIND, B0_SOURCE_KIND } from './source-kind.js'
 
 export const B0_MARKER_PREFIX = 'THREAD-B0-MARKER-'
-// 复用主插件 source：主采集跳过 plugin=dsh-thread 的 user/message，探针标记不污染 Thread 事件流
-const B0_PLUGIN_SOURCE = 'dsh-thread'
+// 探针注入源 kind 在 source-kind.ts 声明（0.2.0 起 MessageSourceMap 按生产者合并扩展，无 catch-all
+// 'plugin' kind）：主采集按 kind 跳过本插件自身注入，探针标记不污染 Thread 事件流。
 
 // 运行时形状声明（dsh-skill/dsh-compaction/dsh-token-meter 类型不在本仓依赖树，按官方契约声明最小面）
 interface SkillRegistryLike {
@@ -199,13 +200,13 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
             if (agent) {
               agent.inject(createUserMessage({
                 content: [{ type: 'text', text: `${B0_MARKER_PREFIX}${compactionId}（压缩后重锚定探针标记）` }],
-                source: { kind: 'plugin', plugin: B0_PLUGIN_SOURCE, form: 'instructions' },
+                source: { kind: B0_SOURCE_KIND, form: 'instructions' },
               }))
               log('06-reanchor', { injected: true, compactionId, agentStatus: agent.status })
               if (env.followup) {
                 agent.steer(createUserMessage({
                   content: [{ type: 'text', text: '批 0 探针问题：如果你当前上下文里看到了以 THREAD-B0-MARKER- 开头的标记，请在你的最终汇报里原样包含该标记。' }],
-                  source: { kind: 'plugin', plugin: B0_PLUGIN_SOURCE, form: 'instructions' },
+                  source: { kind: B0_SOURCE_KIND, form: 'instructions' },
                 }))
                 log('06-reanchor', { steerQueued: true, compactionId })
               }
@@ -231,7 +232,7 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
         }
       }
       if (eventType === 'assistant/message') {
-        const body = (event as { data: { message: { content: Array<{ type: string; text?: string }> } } }).data.message.content
+        const body = (event as unknown as { data: { message: { content: Array<{ type: string; text?: string }> } } }).data.message.content
           .map((b) => (b.type === 'text' ? b.text ?? '' : ''))
           .join('\n')
         if (body.includes(B0_MARKER_PREFIX)) {
@@ -271,10 +272,10 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
           queueMicrotask(() => {
             const agent = agents?.get(String(session.id))
             // 注意：source 不能用 dsh-thread（主插件 isOwnInjection 会把第二轮当纯卡片轮跳过 delta）；
-            // 用独立 tag 让主插件按正常轮处理（delta 块才会跑）——真实双代理场景第二轮即真实用户消息
+            // 用独立 kind 让主插件按正常轮处理（delta 块才会跑）——真实双代理场景第二轮即真实用户消息
             agent?.followup(createUserMessage({
               content: [{ type: 'text', text: 'drill 提问：你在最近上下文里是否看到以 [Thread 状态更新（来自其他会话）] 开头的增量块？如果看到，原样复述其中决策内容。' }],
-              source: { kind: 'plugin', plugin: 'dsh-thread-b0-drill', form: 'instructions' },
+              source: { kind: B0_DRILL_SOURCE_KIND, form: 'instructions' },
             }))
             log('07-drill', { followupQueued: true })
           })
@@ -296,11 +297,11 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
           try {
             agent.inject(createUserMessage({
               content: [{ type: 'text', text: `${B0_MARKER_PREFIX}direct-${Date.now()}` }],
-              source: { kind: 'plugin', plugin: B0_PLUGIN_SOURCE, form: 'instructions' },
+              source: { kind: B0_SOURCE_KIND, form: 'instructions' },
             }))
             agent.steer(createUserMessage({
               content: [{ type: 'text', text: '批 0 探针问题：如果你当前上下文里看到了以 THREAD-B0-MARKER- 开头的标记，请在你的最终汇报中原样包含该标记。' }],
-              source: { kind: 'plugin', plugin: B0_PLUGIN_SOURCE, form: 'instructions' },
+              source: { kind: B0_SOURCE_KIND, form: 'instructions' },
             }))
             log('06-direct', { injected: true, steered: true })
           } catch (err) {

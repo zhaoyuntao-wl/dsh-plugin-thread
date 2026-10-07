@@ -565,18 +565,18 @@ describe("isOwnInjection（卡片独立成轮守卫，B⑧ 迭代）", () => {
   });
 
   it("本插件注入的状态卡 → true（跳过注入，切断自循环）", () => {
-    const card = { source: { kind: "plugin", plugin: "dsh-thread", form: "instructions" } };
+    const card = { source: { kind: "dsh-thread", form: "instructions" } };
     expect(isOwnInjection([card])).toBe(true);
   });
 
   it("用户消息 + 本插件注入混合 → false（正常注入）", () => {
     const user = { source: { kind: "user" } };
-    const card = { source: { kind: "plugin", plugin: "dsh-thread", form: "instructions" } };
+    const card = { source: { kind: "dsh-thread", form: "instructions" } };
     expect(isOwnInjection([user, card])).toBe(false);
   });
 
-  it("其他插件注入 → false（不误伤）", () => {
-    const other = { source: { kind: "plugin", plugin: "other-plugin", form: "instructions" } };
+  it("其他生产者注入 → false（不误伤；0.2.0 起每个生产者有自己的 kind）", () => {
+    const other = { source: { kind: "agent-instructions", form: "instructions" } };
     expect(isOwnInjection([other])).toBe(false);
   });
 
@@ -606,9 +606,9 @@ describe("isHarnessInjection（2026-08-25 Harness 注入过滤，前缀兜底版
   });
 });
 
-describe("isNonUserInjection（2026-08-26 语义规则：form ∈ {notice, instructions, snapshot, catalog}，均探针实证）", () => {
+describe("isNonUserInjection（2026-08-26 语义规则：form ∈ {notice, instructions, snapshot, catalog}；2026-10-07 升级 0.2.0 后 kind 改为每生产者自有 kind，判定信号仍是 form）", () => {
   it("作业完成通知（live 探针实证形状 tool-jobs）→ 命中语义规则", () => {
-    const source = { kind: "plugin", plugin: "tool-jobs", form: "notice" };
+    const source = { kind: "tool-jobs", form: "notice" };
     expect(isNonUserInjection(source, "background job pwsh-1 (pwsh: …) finished")).toBe(true);
     // 语义规则独立于正文：即使正文不带已知前缀也跳过
     expect(isNonUserInjection(source, "job completed")).toBe(true);
@@ -616,11 +616,11 @@ describe("isNonUserInjection（2026-08-26 语义规则：form ∈ {notice, instr
 
   it("2026-08-26 重启注入三条 live 实证形状 → 按 form 语义命中（kind 各异，form 是判定信号）", () => {
     expect(isNonUserInjection({ kind: "agent-instructions", form: "instructions" }, "<system-reminder> The following workspace instructions…")).toBe(true);
-    expect(isNonUserInjection({ kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot" }, "Current runtime context. …")).toBe(true);
+    expect(isNonUserInjection({ kind: "runtime-context", form: "snapshot" }, "Current runtime context. …")).toBe(true);
     expect(isNonUserInjection({ kind: "skill-catalog", form: "catalog" }, "<system-reminder> The available skill catalog changed…")).toBe(true);
     // 语义独立于正文：正文不带已知前缀也跳过
     expect(isNonUserInjection({ kind: "agent-instructions", form: "instructions" }, "workspace rules")).toBe(true);
-    expect(isNonUserInjection({ kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt", form: "snapshot" }, "runtime snapshot")).toBe(true);
+    expect(isNonUserInjection({ kind: "runtime-context", form: "snapshot" }, "runtime snapshot")).toBe(true);
     expect(isNonUserInjection({ kind: "skill-catalog", form: "catalog" }, "skill list")).toBe(true);
   });
 
@@ -630,12 +630,12 @@ describe("isNonUserInjection（2026-08-26 语义规则：form ∈ {notice, instr
   });
 
   it("未知 form 且正文无已知前缀 → 不命中（留给探针收集，不误伤用户消息）", () => {
-    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "ordinary text")).toBe(false);
+    expect(isNonUserInjection({ kind: "unknown-producer", form: "context" }, "ordinary text")).toBe(false);
   });
 
   it("前缀兜底仍生效（source 形状未知时按正文判定）", () => {
-    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "<system-reminder>\n技能目录")).toBe(true);
-    expect(isNonUserInjection({ kind: "plugin", plugin: "unknown", form: "context" }, "Current runtime context. …")).toBe(true);
+    expect(isNonUserInjection({ kind: "unknown-producer", form: "context" }, "<system-reminder>\n技能目录")).toBe(true);
+    expect(isNonUserInjection({ kind: "unknown-producer", form: "context" }, "Current runtime context. …")).toBe(true);
   });
 });
 

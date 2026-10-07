@@ -75,16 +75,17 @@ end to end.
   of the same machine share the same store, and offline sessions behave
   identically.
 
-- **Verified**: dsh **0.1.5-rc.1** (current; the dsh CLI and its SDK packages
-  ship version-locked — the 0.1.5-rc.1 CLI resolves its SDK sub-packages to
-  0.1.5-rc.2). **0.1.1-rc.2**, the previous baseline, is no longer declared.
-- The plugin pins its SDK peers to `^0.1.5-rc.1`
-  (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`); within the
-  0.1.x train, upgrades are expected to be compatible and are verified by an
-  isolated contract probe plus the CI compat matrix
+- **Verified**: dsh **0.2.0-rc.2** (current; the CLI and its SDK sub-packages ship
+  version-locked). **0.1.x is no longer declared** — dsh 0.2.0 replaced the shared
+  `plugin` message source with per-producer `MessageSourceMap` kinds, which this
+  plugin now declares; 0.1.x users should stay on `dsh-thread@1.2.x`.
+- The plugin pins its SDK peers to `^0.2.0-rc.2`
+  (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`); every upgrade is
+  verified by an isolated contract probe (type-level compile against the released
+  SDK plus a live headless profile run) and the CI compat matrix
   (`.github/workflows/ci.yml`) before this table is updated.
-- No promise is made for future major releases (0.2+); each new dsh release is
-  evaluated and the matrix extended before support is claimed.
+- No promise is made beyond the verified entry; each new dsh release is evaluated
+  and the matrix extended before support is claimed.
 
 ## Install
 

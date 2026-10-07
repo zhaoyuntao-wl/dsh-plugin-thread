@@ -1,5 +1,24 @@
 # dsh-thread
 
+## 1.3.0
+
+### Minor Changes
+
+- 支持 dsh **0.2.0-rc.2**（跨过 0.1.6 / 0.1.7 / 0.2.0 三个系列）：SDK peer 由 `^0.1.5-rc.1` 升到 `^0.2.0-rc.2`（cordis peer `^4.0.4`）。
+  
+  契约变化与适配（隔离类型探针 + 隔离 headless live 探针逐条实证）：
+  
+  - **消息来源不再有共享的 `plugin` kind**：0.2.0 的 `MessageSourceMap` 改为"按生产者合并扩展"的和类型，本插件在 `src/source-kind.ts` 声明自己的 kind（`dsh-thread` / `dsh-thread-b0` / `dsh-thread-b0-drill`）；注入源、自身注入识别、batch-0 探针全部改走新 kind。
+  - **压缩 checkpoint 来源改为 `kind: 'compact-checkpoint'`**（原 `{ kind: 'plugin', plugin: 'compact' }`）：压缩摘要跳过逻辑随之更新；新增单测用官方 `isCompactCheckpointSource()` 交叉验证本地常量——官方改名会让测试变红，而不是静默失配。
+  - **`ToolResultBlock` 已移除**：`tool/result` 的调用 id 由结果块字段上移到 `ToolResultMessage.toolCallId`，采集 meta 的 `call_id` 改读新位置。
+  - **MCP 查询通道健壮性修复**（0.1.x 同样存在）：`dist/server.js` 在本进程 cwd 的桶目录不存在时抛 `Cannot open database because the directory does not exist`，整个查询 entry 激活失败；现与插件侧一致先建父目录。
+  
+  live 探针实证（0.2.0-rc.2 隔离 profile，`THREAD_ROOT` 指临时根）：插件激活并报告 core 版本、首轮锚定卡注入且被模型遵循、事件采集完整（含新 call_id）、harness 注入（`runtime-context` / `skill-catalog`）按 form 过滤不落库、自动压缩触发两次 `compact_checkpoint` 且压缩后重锚定卡送达、MCP `query_session_memory` 目录视图可用。
+  
+  0.1.x 不再声明支持（0.1.x 用户请留在 `dsh-thread@1.2.x`）。
+  
+  core dep: `@thread-memory/core` `^1.0.0`（本次 core 未改动；本地 profile 已刷新至 1.0.11）。
+
 ## 1.2.0
 
 ### Minor Changes

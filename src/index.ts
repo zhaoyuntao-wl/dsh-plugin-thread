@@ -5,7 +5,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 // dsh-tools 声明合并 ctx.tools: ToolRuntime（官方类型，guard 签名与 Context 注入一致）
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { createUserMessage, type ContentBlock, type ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
   ThreadStore,
   applyAnalysis,
@@ -31,6 +31,13 @@ import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from '
 import { dirname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { runBatch0Probes } from './batch0-probe.js'
+import {
+  THREAD_SOURCE_KIND,
+  isCompactCheckpointSource,
+  isThreadSource,
+} from './source-kind.js'
+
+export { isCompactCheckpointSource } from './source-kind.js'
 
 export const name = 'dsh-thread'
 
@@ -43,8 +50,6 @@ export const inject = [
   'userQuestions',
   ...(process.env.THREAD_B0_PROBE === '1' || process.env.THREAD_AUTO_COMPACT === '1' ? ['compaction'] : []),
 ]
-
-const PLUGIN_NAME = name
 
 // 插件配置（官方 basic/config 规范：不同部署取值可变的参数必须定义为配置字段，
 // zod v4 实现 Standard Schema，cordis 校验后注入 apply 第二参）
@@ -94,25 +99,7 @@ export function isOwnInjection(messages: readonly unknown[]): boolean {
   if (messages.length === 0) {
     return false
   }
-  return messages.every((m) => {
-    const source = (m as { source?: { kind?: string; plugin?: string } }).source
-    return source?.kind === 'plugin' && source?.plugin === PLUGIN_NAME
-  })
-}
-
-// dsh 压缩 checkpoint 摘要来源标记（官方 @deepseek-ai/dsh-compaction checkpoint 契约）。
-// 2026-09-11 类型探针更正：此前注释称"跨包钉死、renaming 即编译错"——不成立。该标记在官方包内
-// 是模块私有的（未导出 COMPACT_CHECKPOINT_MARKER，也未随类型导出），公共契约是
-// compactCheckpointSource() / isCompactCheckpointSource()。故此处是逐字复制的字符串常量，
-// 官方改名不会编译报错，只能靠升级探针的 live 形状验证兜底（0.1.1-rc.2 → 0.1.5-rc.2 间
-// checkpoint.d.ts 逐字节相同，暂未变）。
-const COMPACT_CHECKPOINT_SOURCE_PLUGIN = 'compact'
-
-// 识别 dsh 压缩 checkpoint 摘要消息（source.plugin === 'compact'，官方 @deepseek-ai/dsh-compaction 契约）。
-// 该消息是压缩事务内 append 的 user/message（摘要正文），Thread 侧已由 compaction/summary → compact_checkpoint
-// 落库摘要全文，此处跳过可避免重复采集 + 避免摘要被 applyAnalysis 当用户话语分析（2026-08-18 修复）。
-export function isCompactCheckpointSource(source: { kind?: string; plugin?: string } | undefined): boolean {
-  return source?.kind === 'plugin' && source?.plugin === COMPACT_CHECKPOINT_SOURCE_PLUGIN
+  return messages.every((m) => isThreadSource((m as { source?: { kind?: string } }).source))
 }
 
 // Harness 注入消息识别（2026-08-25 用户定案，内容前缀兜底版）：<system-reminder> 包裹的工作区指令/skills 目录、
@@ -127,18 +114,18 @@ export function isHarnessInjection(body: string): boolean {
   )
 }
 
-// 非用户话语注入（2026-08-26 两步走第二步，2026-08-26 升级：语义规则 = form 信号集，四者均经 capture-debug.log
-// 探针 live 实证）：
-//   notice       = tool-jobs 作业完成通知（kind=plugin, plugin=tool-jobs）
-//   instructions = 工作区指令注入（kind=agent-instructions, baseline AGENTS.md）
-//   snapshot     = 运行时上下文快照（kind=plugin, plugin=@deepseek-ai/dsh-system-prompt）
-//   catalog      = skills 目录变更（kind=skill-catalog）
+// 非用户话语注入（2026-08-26 两步走第二步；2026-10-07 升级 0.2.0 复核：form 词表未变，kind 改为
+// 每生产者自有 kind——判定只看 form，故语义规则不受 kind 改名影响。四者均经 capture-debug.log 探针 live 实证）：
+//   notice       = 作业完成通知（0.1.x: plugin=tool-jobs）
+//   instructions = 工作区指令注入（agent-instructions，baseline AGENTS.md）
+//   snapshot     = 运行时上下文快照（0.1.x: plugin=@deepseek-ai/dsh-system-prompt）
+//   catalog      = skills 目录变更（skill-catalog）
 // form 字段仅注入源携带，真实用户消息（kind=user）无 form，故按 form 判定即为语义层完整覆盖；
 // 前缀判定退居兜底（未知 form 形态），探针持续收集未知形状。
 const NON_USER_INJECTION_FORMS = new Set(['notice', 'instructions', 'snapshot', 'catalog'])
 
 export function isNonUserInjection(
-  source: { kind?: string; plugin?: string; form?: string } | undefined,
+  source: { kind?: string; form?: string } | undefined,
   body: string,
 ): boolean {
   return (
@@ -815,7 +802,7 @@ export function apply(ctx: Context, config: Config) {
         const agent = agents?.get(sessionId)
         agent?.inject(createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+          source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
         }))
       } catch (err) {
         console.error(`thread dsh: event inject failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -1153,7 +1140,7 @@ export function apply(ctx: Context, config: Config) {
           const source = event.data.source
           // 跳过 Thread 自身的注入（状态卡正文不回流事件流，防自我循环）+ dsh 压缩 checkpoint 摘要
           //（摘要已由 compaction/summary → compact_checkpoint 落库，见 isCompactCheckpointSource）
-          if (source.kind === 'plugin' && (source.plugin === PLUGIN_NAME || isCompactCheckpointSource(source))) {
+          if (isThreadSource(source) || isCompactCheckpointSource(source)) {
             return
           }
           const body = extractText(event.data.content)
@@ -1283,8 +1270,8 @@ export function apply(ctx: Context, config: Config) {
           break
         }
         case 'tool/result': {
-          const resultBlock = event.data.message.content[0] as ToolResultBlock | undefined
-          const callId = resultBlock?.toolCallId ?? 'unknown'
+          // 0.2.0：callId 由结果块字段上移到 ToolResultMessage.callId 位（原 content[0].toolCallId 已无此类型）
+          const callId = String(event.data.message.toolCallId ?? 'unknown')
           const body = extractText(event.data.message.content)
           appendWithRetry(s, {
             session_id: String(session.id),
@@ -1364,7 +1351,7 @@ export function apply(ctx: Context, config: Config) {
             if (deltaText) {
               payload.agent.inject(createUserMessage({
                 content: [{ type: 'text', text: deltaText }],
-                source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+                source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
               }))
               s.setMeta(key, new Date().toISOString())
             }
@@ -1392,7 +1379,7 @@ export function apply(ctx: Context, config: Config) {
           : card
         payload.agent.inject(createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'instructions' },
+          source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
         }))
       }
 

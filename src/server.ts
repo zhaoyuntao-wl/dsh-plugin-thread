@@ -2,9 +2,16 @@
 import { ThreadStore, runQueryTool, THREAD_VERSION, defaultPaths } from "@thread-memory/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
 
 const paths = defaultPaths();
+// 路径按本进程 cwd 解析：新工作区/新启动目录下桶目录尚不存在时，better-sqlite3 直接抛
+// "Cannot open database because the directory does not exist"，整个查询通道（MCP entry）激活失败
+//（2026-10-07 dsh 0.2.0-rc.2 隔离 live 探针实证）。这里与插件侧一致先建父目录。
+mkdirSync(dirname(paths.eventsDbPath), { recursive: true });
+mkdirSync(dirname(paths.structuredDbPath), { recursive: true });
 const store = new ThreadStore({ eventsPath: paths.eventsDbPath, structuredPath: paths.structuredDbPath });
 
 const server = new McpServer({

@@ -22,9 +22,9 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 ## 支持的 dsh 版本
 
 - **本地优先、零常驻**——一切进程内运行：内嵌 SQLite 存储、无后台服务、无云端依赖。同机 web/headless profile 共享同一存储，离线会话行为一致。
-- **已验证**：dsh **0.1.5-rc.1**（当前；dsh CLI 与其 SDK 包同版锁步发布——0.1.5-rc.1 的子包解析到 0.1.5-rc.2）。上一基线 **0.1.1-rc.2** 不再声明支持。
-- 插件钉 SDK peer `^0.1.5-rc.1`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；0.1.x 内升级预期兼容，每次升级经隔离契约探针 + CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
-- 未来大版本（0.2+）不做承诺；每个新 dsh 版本经评估并扩展 matrix 后才声明支持。
+- **已验证**：dsh **0.2.0-rc.2**（当前；CLI 与其 SDK 子包同版锁步发布）。**0.1.x 不再声明支持**——dsh 0.2.0 取消了共享的 `plugin` 消息来源，改为"每个生产者声明自己的 `MessageSourceMap` kind"，本插件已按新契约声明；0.1.x 用户请留在 `dsh-thread@1.2.x`。
+- 插件钉 SDK peer `^0.2.0-rc.2`（dsh-tools / dsh-agent / dsh-session / dsh-user-questions）；每次升级经隔离契约探针（对已发布 SDK 做类型编译 + 隔离 headless profile live 跑一遍）+ CI compat matrix（`.github/workflows/ci.yml`）验证后才更新此表。
+- 除已验证版本外不做承诺；每个新 dsh 版本经评估并扩展 matrix 后才声明支持。
 
 ## 安装
 
