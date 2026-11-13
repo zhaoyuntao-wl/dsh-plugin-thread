@@ -599,7 +599,7 @@ function registerThreadCommands(
     const fromDisk = renderPanelFromDisk(directSid === '' ? undefined : directSid)
     if (fromDisk !== undefined) return fromDisk
     const s = directSid !== '' ? deps.storeFor(directSid) : deps.storeFor('')
-    return renderPanel(s, { sessionId: directSid })
+    return renderPanel(s, { sessionId: directSid, ...(s.projectKey === undefined ? {} : { projectKey: s.projectKey }) })
   })
 
   reg('thread-handoff', '收尾生成一条交接（可选目标角色/会话；无参按 project 寻址）', '[target]', (inv) => {

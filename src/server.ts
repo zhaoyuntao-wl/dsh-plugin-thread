@@ -222,8 +222,12 @@ server.tool(
     const requested = args.session_id === undefined ? undefined : String(args.session_id);
     const scope = (requested === undefined ? undefined : findBucketForSession(requested)) ?? defaultBucket();
     const store = storeFor(scope);
+    // 面板的决策链/目标/验收都按项目合并：不传 projectKey 会显示"目标 0 / 生效 0 / 缺项目键"
+    //（与命令版 /thread-panel 同一坑，2026-11-14 实测）
+    const projectKey = scope.projectKey ?? deriveProjectKey(process.env.THREAD_CWD ?? process.cwd());
     const sid = requested ?? store.getRecentSessionId() ?? "";
-    return { content: [{ type: "text" as const, text: renderPanel(store, { sessionId: sid, ...(args.limit === undefined ? {} : { limit: args.limit }) }) }] };
+    const text = renderPanel(store, { sessionId: sid, projectKey, ...(args.limit === undefined ? {} : { limit: args.limit }) });
+    return { content: [{ type: "text" as const, text }] };
   },
 );
 
