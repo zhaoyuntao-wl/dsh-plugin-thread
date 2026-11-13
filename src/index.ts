@@ -160,8 +160,8 @@ const PUBLISH_NL_RE = /^把(?:刚才|刚才的)?(?:这个)?(?:决策|决定|目�
 const ISOLATE_RE = /^(?:\/thread-iso|隔离|开始隔离|进入隔离|临时隔离|静默|免打扰|别打扰)$/
 const UNISOLATE_RE = /^(?:\/thread-uniso|解除隔离|退出隔离|恢复共享)$/
 const CFM_LIST_RE = /^\/thread-cfm$/
-const CFM_DO_RE = /^\/thread-cfm\s+do\s+([tc]#\d+)(?:\s+(.+))?$/s
-const CFM_CNL_RE = /^\/thread-cfm\s+cnl\s+([tc]#\d+)$/
+const CFM_DO_RE = /^\/thread-cfm\s+do\s+([tcq]#\d+)(?:\s+(.+))?$/s
+const CFM_CNL_RE = /^\/thread-cfm\s+cnl\s+([tcq]#\d+)$/
 const CFM_CNL_ALL_RE = /^\/thread-cfm\s+cnl\s+all$/
 // 收尾词白名单（1.2 收尾自动沉淀触发，整条消息精确匹配，防讨论性语句误触发）
 const CLOSING_WORD_RE = /^(?:先收了|先收|收工了|收工|今天到这|明天继续|歇了|歇|先记|暂时这样)$/
@@ -279,8 +279,8 @@ export function parsePubCommand(body: string): PubCommand | undefined {
 
 export type CfmCommand =
   | { action: 'list' }
-  | { action: 'do'; target: 't' | 'c'; id: number; text?: string }
-  | { action: 'cnl'; target: 't' | 'c'; id: number }
+  | { action: 'do'; target: 't' | 'c' | 'q'; id: number; text?: string }
+  | { action: 'cnl'; target: 't' | 'c' | 'q'; id: number }
   | { action: 'cnl-all' }
 
 // /thread-cfm 待处理收件箱（2026-08-21 命令重构）：待办 t# + 候选 c# 命名空间（两张表 id 单空间冲突）；
@@ -295,11 +295,11 @@ export function parseCfmCommand(body: string): CfmCommand | undefined {
   }
   const d = text.match(CFM_DO_RE)
   if (d) {
-    return { action: 'do', target: d[1][0] as 't' | 'c', id: Number(d[1].slice(2)), text: d[2]?.trim() || undefined }
+    return { action: 'do', target: d[1][0] as 't' | 'c' | 'q', id: Number(d[1].slice(2)), text: d[2]?.trim() || undefined }
   }
   const c = text.match(CFM_CNL_RE)
   if (c) {
-    return { action: 'cnl', target: c[1][0] as 't' | 'c', id: Number(c[1].slice(2)) }
+    return { action: 'cnl', target: c[1][0] as 't' | 'c' | 'q', id: Number(c[1].slice(2)) }
   }
   return undefined
 }
@@ -420,17 +420,29 @@ export function renderIsolatedRows(store: ThreadStore, sessionId: string, resour
 export function renderCfmList(store: ThreadStore, sessionId: string, projectKey?: string): string {
   const todos = store.listTodos({ sessionId, status: 'pending', limit: 20 })
   const candidates = store.listPendingCandidates(projectKey ? { sessionId, projectKey } : { sessionId })
-  if (todos.length === 0 && candidates.length === 0) {
+  // 待答问题优先级最高（P0-3）：模型在等答案，超时会被假设答案顶替
+  const questions = listOpenQuestions(store, { ...(projectKey ? { projectKey } : { sessionId }), status: 'open', limit: 10 })
+  if (todos.length === 0 && candidates.length === 0 && questions.length === 0) {
     return '[Thread 待处理] 当前无待处理事项。'
   }
   const lines: string[] = []
+  for (const q of questions) {
+    let text = ''
+    try {
+      const parsed = JSON.parse(q.questions_json) as Array<{ question?: string }>
+      text = parsed[0]?.question ?? ''
+    } catch {
+      text = q.questions_json
+    }
+    lines.push(`  q#${q.id} [待答] ${text.slice(0, 60)}（call ${q.call_id}）`)
+  }
   for (const t of todos) {
     lines.push(`  t#${t.id} [待办] ${t.text.slice(0, 60)}${t.basis ? `（${t.basis}）` : ''}`)
   }
   for (const c of candidates) {
     lines.push(`  c#${c.id} [候选${c.kind === 'decision' ? '决策' : '偏好'}] ${c.text.slice(0, 60)}`)
   }
-  return `[Thread 待处理]\n${lines.join('\n')}\n操作：/thread-cfm do <id> 完成/转正（候选可带修正文本） | cnl <id> 丢弃/取消 | cnl all`
+  return `[Thread 待处理]\n${lines.join('\n')}\n操作：/thread-cfm do q#<id> <答案文本> 关闭问题 | do <id> 完成/转正 | cnl <id> 丢弃/取消 | cnl all`
 }
 
 // 命令行判定（2026-08-21）：Thread 命令消息只走命令处理，不喂 applyAnalysis——
@@ -797,6 +809,13 @@ export function handleCfmCommand(
     return
   }
   if (cmd.action === 'do') {
+    if (cmd.target === 'q') {
+      const ok = settleOpenQuestion(store, cmd.id, 'settled', { answer: cmd.text ?? '（手工标记已处理）' })
+      respond(ok
+        ? `[Thread] 问题 q#${cmd.id} 已答并关闭${cmd.text ? '（答案已记录）' : ''}。注意：这不会自动续跑该会话。`
+        : `[Thread] 问题 q#${cmd.id} 不存在或已关闭。`)
+      return
+    }
     if (cmd.target === 't') {
       const ok = store.updateTodoStatus(cmd.id, 'done')
       respond(ok ? `[Thread] 待办 t#${cmd.id} 已完成。` : `[Thread] 待办 t#${cmd.id} 不存在。`)
@@ -809,6 +828,11 @@ export function handleCfmCommand(
     return
   }
   if (cmd.action === 'cnl') {
+    if (cmd.target === 'q') {
+      const ok = settleOpenQuestion(store, cmd.id, 'cancelled')
+      respond(ok ? `[Thread] 问题 q#${cmd.id} 已丢弃。` : `[Thread] 问题 q#${cmd.id} 不存在或已关闭。`)
+      return
+    }
     if (cmd.target === 't') {
       const ok = store.updateTodoStatus(cmd.id, 'dropped')
       respond(ok ? `[Thread] 待办 t#${cmd.id} 已丢弃。` : `[Thread] 待办 t#${cmd.id} 不存在。`)
