@@ -511,6 +511,14 @@ function renderPanelFromDisk(sessionId?: string): string | undefined {
   }
 }
 
+// timed 变体的超时结果带固定文案（来源：@deepseek-ai/dsh-tool-ask-user 的 pendingNotice）。
+// 用文案而非关键字猜测做判定：这是 dsh 自己写进结果的说明字段，属确定性标记。
+export const TIMED_OUT_NOTICE = 'No answer batch arrived before the timeout'
+
+export function isTimedOutResult(body: string): boolean {
+  return body.includes(TIMED_OUT_NOTICE)
+}
+
 // 最近一次 pre-step 见到的会话 id：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
 let lastActiveSessionId = ''
 
@@ -1456,10 +1464,17 @@ export function apply(ctx: Context, config: Config) {
             body: body.slice(0, 2000),
             meta: { call_id: callId },
           }, { projectKey, origin: `dsh://toolresult#${callId}` }, busyRetries, busyRetryDelayMs)
-          // 问题得到回答 → 出队（settled）。只处理仍在 open 的同一 call_id。
+          // 问题得到结果 → 出队。超时结果（dsh 固定文案）记为 timed_out 而非"已回答"，
+          // 保留"这条替你决定了"的可见性；用户真回答记 settled。
           try {
             const pending = listOpenQuestions(s, { projectKey, status: 'open', limit: 50 }).find((q) => q.call_id === callId)
-            if (pending) settleOpenQuestion(s, pending.id, 'settled', { answer: body.slice(0, 500) })
+            if (pending) {
+              const timedOut = isTimedOutResult(body)
+              settleOpenQuestion(s, pending.id, timedOut ? 'timed_out' : 'settled', {
+                answer: timedOut ? null : body.slice(0, 500),
+                notice: timedOut ? body.slice(0, 200) : null,
+              })
+            }
           } catch (err) {
             console.error(`thread dsh: open question settle failed: ${err instanceof Error ? err.message : String(err)}`)
           }
