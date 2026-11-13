@@ -13,11 +13,16 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 - **行为契约技能**——`thread` 技能注册进底座技能目录（"需要细节就调工具"）并在锚点注入，模型不必"记得自己有记忆"。
 - **产出识别**——write/edit 类工具写出的 markdown 文档在写时登记为产出并建血缘边；`/thread-reg ast` 覆盖显式登记。
 - **决策与偏好的显式通道**——决策经 `/thread-reg dec`（用户，`--supersedes <id>` 演化取代链）或模型的 `record_decision` 工具（行为契约指示模型：用户定案或自己落定决策时调用）记录；偏好/教训经 `/thread-reg fdb` 记录（"不要/别"句式自动分类为教训）。决策/偏好的自然语言判定已停用——文本启发式零误报；未显式记录的仍留在事件流水可回拉（目标判定与完成判定保留，带多行粘贴守卫）。
+- **只读状态面板——模型"以为"的东西，按需可见**——`/thread-panel`（及 `thread_panel` MCP 工具）渲染目标、决策链（含取代关系）、未决、交接、本轮注入回执、验收证据与最近事件，按会话作用域；回执行回答"这一轮到底喂了什么"，面板从磁盘解析会话所在桶，因此在拿不到 agent 对象的命令上下文里也成立。
+- **证据门——"做完了"必须有证据**——验收不是声明而是执行证据：`verify` 逐条跑命令，把命令 + 退出码 + 环境指纹 + commit 落进 `evidence` 表，返回 `passed` / `failed` / `missing-env`（没有命令 = 缺环境，永不算通过）。验收条目未证时**拒绝**把目标标完成，并回告缺哪几条；会话关闭时会**自动重跑**已登记条目，交接里带的是刚测出的结论而不是上一轮的旧判断。
+- **阻塞性问题入库**——`ask_user_question` 调用带 `call_id` 落 `open_questions`；真实回答置 `settled`，超时（按底座文档化的 `pendingNotice` 文案判定，不猜关键字）记 `timed_out`——"它替你决定了"这件事保持可见，不会被抹成"已回答"。
 - **收尾沉淀 + 收件箱**——收尾词把进行中目标沉淀为待办；`/thread-cfm` 是唯一待处理收件箱：待办（`t#id`）与候选（`c#id`）一个视图——`do` 完成/转正（候选可带修正文本）、`cnl` 丢弃、`cnl all` 双清。状态卡展示前几条候选，杜绝无声堆积。
 - **行为边界（1.0，直说）**——候选不会自动产出：决策/偏好的自然语言判定已停用，`c#` 条目只会显示存量遗留，直到发布后的抽取层上线；待办相反有活跃产出（收尾沉淀 + 目标完成自愈）。决策不会自行过期——时间性决策用 `--supersedes` 显式收口。目标完成判定偏保守（非 ASCII ≥4 连字符 / 纯 ASCII ≥8 连字符重叠；短英文目标宁漏勿误，用 `/thread-rev gol` 废弃）。完整清单见 [Thread README](https://github.com/zhaoyuntao-wl/Thread) 的「诚实边界」一节。
 - **资源解除**——`/thread-rev <ast|dec|fdb|gol> <ids|all>` 解除注册：决策/偏好/产出删除（事件流水保留原文）、目标走状态机废弃并同步自愈关联待办。每条结构化行在状态卡上带可见 `#id`，记忆全程可人工编辑。
 - **会话隔离**——`/thread-iso` / `/thread-uniso`；`/thread-pub <ast|dec|fdb|gol> <ids|all>` 把隔离期产生的行转共享。
 - **可选主动压缩**——`THREAD_AUTO_COMPACT=1` 时插件在回合边界监控 token 压力并静默触发 `compactNow`；无论哪种方式压缩，状态都会在压缩后重锚定。
+
+> 完整使用说明见 [使用手册](./docs/manual.zh-CN.md)。
 
 ## 支持的 dsh 版本
 
@@ -93,6 +98,29 @@ dsh 插件需在 profile 的 `bundles` 中引用才生效。在
 | `/thread-pub` | 列出隔离行（全部资源，id 来源） |
 | `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | 隔离行转共享 |
 | `/thread-handoff [target]` | 按本会话状态生成一条交接（可指定目标角色；不带参数按项目寻址） |
+| `/thread-panel` | 只读面板：目标 · 决策链（含取代） · 未决 · 本轮注入回执 · 验收证据 · 交接 · 最近事件 |
+
+## 证据门
+
+验收是证据，不是声明：
+
+```js
+// 登记并执行验收条目（省略 criteria 则重跑已登记的条目）
+await mcp.callTool({ name: "verify", arguments: { criteria: [
+  { key: "unit-tests", command: "pnpm test" },
+  { key: "lint",       command: "pnpm lint" },
+] } });
+// → 验收 1/2 已证（缺：lint）  + 每条 { status, exit, output, evidenceId }
+```
+
+- 每次执行都把命令、退出码、环境指纹与 commit 落进 `evidence`；面板按条目只显示最新一条。
+- `checkCompletionGate` 在任一条目没有 passing 证据时**拒绝**把目标标完成，且拒绝会回告模型（`[Thread 证据门] 目标未标完成：#3 缺 lint`），不吞掉。
+- 没有命令的条目是 `missing-env`：它会阻止完成，但永远不算证据。
+- 交接 brief 因此多一行：`验收：验收 1/2 已证（缺：lint）`。
+
+## 可见性与回执
+
+状态卡是以底座 *instructions* 形式注入的，不显示为对话气泡。为了让"到底注入了什么"可审计，每次注入都写一条回执（`anchor | status-card | handoff` + 时间 + 摘要），面板渲染为「本轮注入」。卡片在注入那一刻从库里重建（从不缓存），并在决策确认、结构类命令、收尾沉淀、压缩后刷新，另外每轮 `agent/pre-step` 注入一次。
 
 ## 交接（给编排器）
 

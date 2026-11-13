@@ -39,6 +39,26 @@ end to end.
   lossless event stream remains the backstop for anything unrecorded. (Goal
   detection from short imperative messages and completion detection stay on,
   guarded against pasted/multi-line text.)
+- **Read-only panel — what the model believes, on demand** — `/thread-panel`
+  (and the `thread_panel` MCP tool) renders goals, the decision chain with
+  supersession, open items, handoffs, the last injection receipt, acceptance
+  evidence and recent events, scoped to a session. The receipt line answers
+  “what exactly was fed to the model this round”; the panel resolves the
+  session's project bucket from disk, so it works from a command context that
+  never saw the agent object.
+- **Evidence gate — “done” must be proven** — decisions and completions carry
+  evidence instead of claims: `verify` runs each acceptance criterion, records
+  command + exit code + env fingerprint + commit in the `evidence` table, and
+  returns `passed` / `failed` / `missing-env` (a criterion with no command is
+  *missing environment*, never a pass). Completing a goal whose criteria are
+  unproven is refused, and the refusal names the missing criteria. On close the
+  registered criteria are **re-run automatically**, so the handoff carries fresh
+  evidence rather than the previous round's verdict.
+- **Blocking questions are captured** — `ask_user_question` calls land in
+  `open_questions` with their `call_id`; a real answer settles the row, a timeout
+  (recognized by the base's documented `pendingNotice` text, not keyword
+  guessing) is recorded as `timed_out` so “the agent decided for you” stays
+  visible instead of being smoothed into “answered”.
 - **Closing sediment + inbox** — closing words sediment in-progress goals into
   todos; `/thread-cfm` is the single pending-work inbox: todos (`t#id`) and
   candidates (`c#id`) in one view — `do` completes/promotes (candidates accept a
@@ -67,6 +87,8 @@ end to end.
 - **Dev probe, inert by default** — the package ships a `batch0-probe` module
   used for contract smoke-testing during development; it is inert unless
   `THREAD_B0_PROBE=1` is set, so normal sessions are unaffected.
+
+> Full user guide: [manual (zh-CN)](./docs/manual.zh-CN.md).
 
 ## Supported dsh versions
 
@@ -162,6 +184,38 @@ messages where no command UI exists. One grammar, six commands:
 | `/thread-pub` | List isolated rows (all resources, ids for sharing) |
 | `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | Share isolated rows |
 | `/thread-handoff [target]` | Produce a handoff from this session's state (optional target role; no target = project-addressed) |
+| `/thread-panel` | Read-only panel: goals · decision chain (with supersession) · open items · last injection receipt · acceptance evidence · handoffs · recent events |
+
+## Evidence gate
+
+Acceptance is evidence, not assertion:
+
+```js
+// record + run criteria (omit `criteria` to re-run what was registered before)
+await mcp.callTool({ name: "verify", arguments: { criteria: [
+  { key: "unit-tests", command: "pnpm test" },
+  { key: "lint",       command: "pnpm lint" },
+] } });
+// → 验收 1/2 已证（缺：lint）  + per-criterion { status, exit, output, evidenceId }
+```
+
+- Each run stores command, exit code, environment fingerprint and commit in
+  `evidence`; the panel shows the latest row per criterion.
+- `checkCompletionGate` refuses to mark a goal complete while any registered
+  criterion lacks a passing row, and the refusal is surfaced to the model
+  (`[Thread 证据门] 目标未标完成：#3 缺 lint`), not swallowed.
+- Criteria with no command are `missing-env` — they block completion but are
+  never counted as proof.
+- Handoff briefs gain one line: `验收：验收 1/2 已证（缺：lint）`.
+
+## Visibility and receipts
+
+The status card is injected as base *instructions*, so it is not a chat bubble.
+To keep “what was injected” auditable, every injection writes a receipt
+(`kind: anchor | status-card | handoff`, timestamp + summary) that the panel
+renders as 「本轮注入」. Cards are rebuilt from the store at injection time —
+they are never cached — and refreshed after decision confirmation, structural
+commands, closing sediment and compaction, plus once per turn in `agent/pre-step`.
 
 ## Handoffs (for orchestrators)
 
@@ -204,7 +258,8 @@ Details: [Thread docs — handoff](https://github.com/zhaoyuntao-wl/Thread/blob/
 
 The package ships an embedded MCP server (`bin: dsh-thread`) exposing the same
 `query_session_memory` contract over MCP for bases and setups where native tool
-registration is unavailable. See the [Thread Memory
+registration is unavailable, plus `thread_panel`, `verify`, `handoff_next` and
+`handoff_ack`. See the [Thread Memory
 Protocol](https://github.com/zhaoyuntao-wl/Thread/blob/main/docs/design/memory-protocol.md).
 
 ## Repository relationship
