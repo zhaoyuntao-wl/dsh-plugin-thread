@@ -82,4 +82,26 @@ describe("createSessionScopes（会话工作区 → 项目键，2026-10-07 D1）
       rmSync(forced, { recursive: true, force: true });
     }
   });
+
+  it("dsh 0.2.x：用 header.cwd（没有 meta）也不退回进程 cwd（2026-11-13 回归）", () => {
+    const root = makeRoot();
+    const fallback = makeRoot();
+    const wsA = makeRoot();
+    const wsB = makeRoot();
+    try {
+      const scopes = createSessionScopes({ root, fallbackCwd: fallback });
+      const a = scopes.keyForSession({ id: "s-a", header: { cwd: wsA } });
+      const b = scopes.keyForSession({ id: "s-b", header: { cwd: wsB } });
+      const fb = scopes.fallbackKey();
+      // 两条会话各自落到自己的工作区桶，且都不等于进程 cwd 兜底
+      expect(a).not.toBe(b);
+      expect(a).not.toBe(fb);
+      expect(b).not.toBe(fb);
+      // header.cwd 优先于兼容字段 meta.cwd
+      expect(scopes.keyForSession({ id: "s-c", header: { cwd: wsA }, meta: { cwd: wsB } })).toBe(a);
+      scopes.closeAll();
+    } finally {
+      for (const d of [root, fallback, wsA, wsB]) rmSync(d, { recursive: true, force: true });
+    }
+  });
 });

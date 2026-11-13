@@ -1,5 +1,8 @@
-// 会话作用域解析（2026-10-07 D1 修复）：项目键跟随**会话工作区**（dsh Session.meta.cwd），
-// 不再取进程 cwd——一个 dsh 进程服务的多工作区会话曾共用同一个桶（跨工作区串桶 + 同会话历史跨桶劈裂）。
+// 会话作用域解析（2026-10-07 D1 修复；2026-11-13 修 dsh 0.2.x 字段名）：
+// 项目键跟随**会话工作区**，不再取进程 cwd——一个 dsh 进程服务的多工作区会话曾共用同一个桶
+// （跨工作区串桶 + 同会话历史跨桶劈裂）。
+// dsh 0.2.x 的 Session 暴露的是 `header.cwd`（SessionHeader），不是 `meta.cwd`；
+// 旧实现只读 meta.cwd，字段不存在时静默退回进程 cwd，等于修复从未生效。
 // THREAD_CWD 仍是最优先的显式覆盖；无会话上下文时退回进程 cwd。
 // 抽成独立模块：可单测、可复用（插件主路径与命令通道共用同一解析）。
 import { mkdirSync } from 'node:fs'
@@ -8,7 +11,16 @@ import { ThreadStore, deriveProjectKey, hashProjectKey } from '@thread-memory/co
 
 export interface SessionLike {
   id?: unknown
+  /** dsh 0.2.x：Session.header.cwd */
+  header?: { cwd?: string }
+  /** 历史/兼容字段（更早版本或测试替身） */
   meta?: { cwd?: string }
+}
+
+/** 会话工作区（header.cwd 优先，兼容 meta.cwd；都无则 undefined） */
+export function sessionCwd(session: unknown): string | undefined {
+  const s = session as SessionLike | undefined
+  return s?.header?.cwd ?? s?.meta?.cwd
 }
 
 export interface SessionScopesOptions {
@@ -62,7 +74,7 @@ export function createSessionScopes(opts: SessionScopesOptions): SessionScopes {
       if (cached !== undefined) {
         return cached
       }
-      const key = deriveProjectKey(overrideCwd() ?? s?.meta?.cwd ?? opts.fallbackCwd)
+      const key = deriveProjectKey(overrideCwd() ?? sessionCwd(s) ?? opts.fallbackCwd)
       if (id) {
         keyBySession.set(id, key)
       }

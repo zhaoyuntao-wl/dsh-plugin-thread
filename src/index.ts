@@ -30,7 +30,7 @@ import { appendFileSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { runBatch0Probes } from './batch0-probe.js'
-import { createSessionScopes } from './scope.js'
+import { createSessionScopes, sessionCwd as resolveSessionCwd } from './scope.js'
 import {
   THREAD_SOURCE_KIND,
   isCompactCheckpointSource,
@@ -767,8 +767,9 @@ export function apply(ctx: Context, config: Config) {
   const compactPressureTokens = config.compactPressureTokens ?? 0
   const candidateTtlDays = config.candidateTtlDays ?? 14
   const confirmDecisions = config.confirmDecisions ?? 'auto'
-  // 项目键解析（2026-10-07 D1 修复）：跟随**会话工作区**（dsh Session.meta.cwd），不再取进程 cwd——
-  // 一个 dsh 进程服务的多工作区会话曾共用同一个桶（跨工作区串桶 + 同会话历史跨桶劈裂）。
+  // 项目键解析（2026-10-07 D1 修复；2026-11-13 修 dsh 0.2.x 字段名）：跟随**会话工作区**
+  // （Session.header.cwd；兼容 meta.cwd），不再取进程 cwd——一个 dsh 进程服务的多工作区会话
+  // 曾共用同一个桶（跨工作区串桶 + 同会话历史跨桶劈裂）。
   // 解析与"按 key 缓存库"的逻辑收口在 scope.ts（可单测）；agents 注册表在后面声明，故用惰性回调。
   const fallbackCwd = process.env.THREAD_CWD ?? process.cwd()
   const threadDir = threadRoot()
@@ -1070,7 +1071,7 @@ export function apply(ctx: Context, config: Config) {
       const s = storeFor(projectKey)
       const sessionId = String(session.id)
       // 命令里的相对路径按**会话工作区**解析（同源修复：进程 cwd 可能是别的目录）
-      const sessionCwd = (session as unknown as { meta?: { cwd?: string } }).meta?.cwd ?? fallbackCwd
+      const sessionCwd = resolveSessionCwd(session) ?? fallbackCwd
       // 压缩边界 → compact_checkpoint（§1.5 情境 C：post-compact 判定依赖此事件）。
       // dsh 压缩事务事件顺序 = compaction/start → compaction/summary → user/message(checkpoint 摘要) → compaction/end；
       // 此前四类全落 default 分支被丢弃 → post-compact 情境在 dsh 上从未触发（2026-08-18 修复）。
