@@ -218,8 +218,8 @@ export function runBatch0Probes(ctx: Context, env: Batch0ProbeEnv): void {
           }
         })
       }
-      if (eventType === 'user/message') {
-        const body = extractText((event as { data: { content: Array<{ type: string; text?: string }> } }).data.content ?? [])
+      if (event.type === 'user/message') {
+        const body = extractText(event.data.content ?? [])
         if (body.includes(B0_MARKER_PREFIX)) {
           log('06-marker-landed', { body: body.slice(0, 200) })
         }
