@@ -32,3 +32,4 @@ docs/local/
 
 # batch-0 probe fixtures (spike artifacts)
 .batch0/
+.trial/
