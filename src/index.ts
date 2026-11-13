@@ -508,9 +508,8 @@ function renderPanelFromDisk(sessionId?: string): string | undefined {
   }
 }
 
-// 最近一次 pre-step 见到的会话 id + 项目键：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
+// 最近一次 pre-step 见到的会话 id：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
 let lastActiveSessionId = ''
-let lastActiveProjectKey = ''
 
 function registerThreadCommands(
   ctx: Context,
@@ -1506,7 +1505,6 @@ export function apply(ctx: Context, config: Config) {
       const sessionId = payload.agent.session?.id ?? ''
       // 命令上下文拿不到 agent.session（实测），记下最近活跃会话供 /thread-panel 等命令兜底
       if (String(sessionId) !== '') lastActiveSessionId = String(sessionId)
-      lastActiveProjectKey = projectKey
       // G5 跨会话 delta（2.3.2）：回合边界水位判定，他代理有新决策/目标/偏好/候选变更才注入
       if (sessionId && !s.getSessionIsolation(String(sessionId))) {        try {
           const key = `lastDeltaAt:${String(sessionId)}`

@@ -13,6 +13,9 @@ import {
   proposeHandoff,
   renderBrief,
   renderPanel,
+  renderEvidenceLine,
+  progressFor,
+  verifyCriteria,
   runQueryTool,
   threadRoot,
   THREAD_VERSION,
@@ -220,6 +223,45 @@ server.tool(
     const store = storeFor(scope);
     const sid = requested ?? store.getRecentSessionId() ?? "";
     return { content: [{ type: "text" as const, text: renderPanel(store, { sessionId: sid, ...(args.limit === undefined ? {} : { limit: args.limit }) }) }] };
+  },
+);
+
+server.tool(
+  "verify",
+  "证据门：逐条跑验收命令并落证据（命令 + 退出码 + 环境指纹 + commit），返回 passed/failed/missing-env；缺证据的条目不算通过。",
+  {
+    criteria: z
+      .array(
+        z.object({
+          key: z.string().describe("验收条目键，如 unit-tests"),
+          command: z.string().optional().describe("验证命令；不给则记 missing-env"),
+          cwd: z.string().optional(),
+        }),
+      )
+      .describe("验收条目列表"),
+    session_id: z.string().optional().describe("会话 id；缺省用最近活跃会话"),
+  },
+  async (args) => {
+    const requested = args.session_id === undefined ? undefined : String(args.session_id);
+    const scope = (requested === undefined ? undefined : findBucketForSession(requested)) ?? defaultBucket();
+    const store = storeFor(scope);
+    const projectKey = scope.projectKey ?? deriveProjectKey(process.env.THREAD_CWD ?? process.cwd());
+    const sessionId = requested ?? store.getRecentSessionId() ?? "mcp-verify";
+    const report = verifyCriteria(store, {
+      projectKey,
+      sessionId,
+      criteria: args.criteria,
+      cwd: process.env.THREAD_CWD ?? process.cwd(),
+    });
+    const progress = progressFor(store, projectKey);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `${renderEvidenceLine(progress)}\n${JSON.stringify(report, null, 2)}`,
+        },
+      ],
+    };
   },
 );
 
