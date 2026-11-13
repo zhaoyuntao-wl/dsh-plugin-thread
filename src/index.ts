@@ -20,6 +20,7 @@ import {
   parseBrief,
   parseToolArgs,
   proposeHandoff,
+  recordInjection,
   renderPanel,
   renderBrief,
   renderStateDelta,
@@ -1486,6 +1487,15 @@ export function apply(ctx: Context, config: Config) {
           content: [{ type: 'text', text }],
           source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
         }))
+        // 注入回执（P0-0）：让人/编排器能确认这一轮到底喂了什么
+        try {
+          recordInjection(s, String(sessionId), {
+            kind: isFreshSession ? 'anchor' : 'status-card',
+            summary: `${isFreshSession ? '首轮锚定 + ' : ''}状态卡 ${text.length} 字符`,
+          })
+        } catch (err) {
+          console.error(`thread dsh: receipt failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
       }
 
       // 候选超时接线（2026-08-20 收口）：超龄 pending → ignored（防堆积；原文在事件流水，决策不丢）
@@ -1519,6 +1529,14 @@ export function apply(ctx: Context, config: Config) {
                 source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
               }))
               s.setHandoffStatus(latest.id, 'delivered')
+              try {
+                recordInjection(s, String(sessionId), {
+                  kind: 'handoff',
+                  summary: `交接 #${latest.id}（${latest.to_role ?? 'project'}）${parseBrief(latest.brief_json).goal.slice(0, 60)}`,
+                })
+              } catch (err) {
+                console.error(`thread dsh: receipt failed: ${err instanceof Error ? err.message : String(err)}`)
+              }
             }
             s.setMeta(handoffKey, new Date().toISOString())
           }
