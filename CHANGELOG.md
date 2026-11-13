@@ -1,5 +1,25 @@
 # dsh-thread
 
+## 1.12.0
+
+### Minor Changes
+
+- d91a773: 阻塞性问题采集（P0-3 接线）：
+  
+  - 采集 `ask_user_question` 的 `tool/call` 事件 → `open_questions` 收件箱（`call_id` + 原始 questions JSON，不解析自然语言）；
+  - 对应 `tool/result` 到达 → 该问题标记 `settled` 并留存答案摘要（出队，不再计入待答）；
+  - 超时不静默：`open_questions` 停留 `open`，由 core 的 `markTimedOut` 把模型假设落成待确认候选；
+  - 状态卡与 `/thread-panel` 分别显示「待答问题 N 条」与「待答问题」区块。
+  
+  core dep: `@thread-memory/core` ≥（带来：`open_questions` 表、`recordOpenQuestion` / `settleOpenQuestion` / `markTimedOut`）。
+- 734eb11: 证据门接入（P0-2）：
+  
+  - 新增 MCP 工具 `verify`：逐条跑验收命令、落证据（命令 + 退出码 + 环境指纹 + commit），返回 `passed / failed / missing-env` 与当前进度行；
+  - 状态卡在登记过验收条目的项目上多一行「验收 X/Y 已证（缺：…）」；
+  - `/thread-panel` 增加「验收证据」区块：进度 + 最近条目（✓/✗、exit、命令）。
+  
+  core dep: `@thread-memory/core` ≥（带来：`verifyCriteria` / `progressFor` / `renderEvidenceLine` 与 `evidence` 表）。
+
 ## 1.11.6
 
 ### Patch Changes
