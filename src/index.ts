@@ -13,13 +13,13 @@ import {
   classifyReportEvent,
   classifyWriteEvent,
   createCloseOutHandoff,
-  detectGoalCompletion,
-  detectSituation,
+  detectGoalCompletion,  detectSituation,
   extractTitleFromContent,
   getStateDelta,
   matchToolFeedback,
   parseBrief,
   parseToolArgs,
+  proposeHandoff,
   renderBrief,
   renderStateDelta,
   runQueryTool,
@@ -978,8 +978,48 @@ export function apply(ctx: Context, config: Config) {
   // 模型决策上报工具（2026-08-21 结构通道化）：决策 NL 判定停用后，模型通道 = record_decision 工具。
   // 行为契约（thread skill）指示模型在用户定案/自己确定采用某方案时调用；一条调用记一条 active 决策。
   // supersedes_id 可选：跨会话接续时取代旧决策（id 从状态卡/决策列表/query_session_memory 获取）。
-  const disposeRecordTool = ctx.tools.register(defineTool({
-    name: 'record_decision',
+  const disposeProposeTool = ctx.tools.register(defineTool({
+    name: 'propose_handoff',
+    description: '提议把本会话的结论交接给下一个会话（跨会话同步：调研→开发、开发→测试）。只在用户要求"同步过去/交给下个会话"或会话收尾有未交接结论时调用；Thread 只做交接、不做调度，不会启动任何会话。同目标重复提议幂等。',
+    parameters: {
+      to_role: { type: 'string', description: '目标角色（analysis/dev/test/supervisor）；不给则按项目寻址，任意下一会话可收到' },
+      goal: { type: 'string', description: '一句话目标；缺省取本会话生效目标' },
+      next: { type: 'string', description: '下一步（分号分隔，最多 3 条）' },
+      artifacts: { type: 'string', description: '产物指针（文件路径，分号分隔；只放指针不塞全文）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    execute: async (args, exec) => {
+      const execSession = exec.agent?.session
+      rememberSession(execSession)
+      const projectKey = execSession ? projectKeyForSession(execSession) : scopes.fallbackKey()
+      const s = storeFor(projectKey)
+      const sid = String(exec.agent?.session?.id ?? s.getRecentSessionId() ?? '')
+      const splitList = (raw: unknown): string[] | undefined => {
+        if (typeof raw !== 'string') return undefined
+        const items = raw.split(/[;；]/).map((t) => t.trim()).filter((t) => t.length > 0)
+        return items.length > 0 ? items : undefined
+      }
+      const handoff = proposeHandoff(
+        s,
+        sid,
+        {
+          ...(typeof args.to_role === 'string' && args.to_role.trim() ? { toRole: args.to_role.trim() } : {}),
+          ...(typeof args.goal === 'string' && args.goal.trim() ? { goal: args.goal.trim() } : {}),
+          ...(splitList(args.next) ? { next: splitList(args.next) } : {}),
+          ...(splitList(args.artifacts) ? { artifacts: splitList(args.artifacts) } : {}),
+        },
+        { projectKey, taskId: process.env.THREAD_TASK_ID, fromRole: process.env.THREAD_ROLE },
+      )
+      injectStatusCardRefresh(sid)
+      return `[Thread] 已生成交接 #${handoff.id}（${handoff.to_role ?? '按项目寻址'}）：${parseBrief(handoff.brief_json).goal.slice(0, 60)}`
+    },
+  }))
+  ctx.effect(() => () => disposeProposeTool())
+
+  const disposeRecordTool = ctx.tools.register(defineTool({    name: 'record_decision',
     description: '把用户定案或你做出的影响后续的决策记录为 Thread 正式决策（决策链）。用户拍板方案、你确定采用某做法、或用户说"就按X"时调用；一条调用记一条决策，text = 决策本身（不带论证），先写适用条件/例外、再写动作（条件在句首，卡片截断时也读得懂）。登记后需用户在弹窗确认才生效（确认前不算已记录，报告为待确认）；无弹窗环境自动确认。',
     parameters: {
       text: { type: 'string', description: '决策文本（一句话，不含论证过程）' },
@@ -1355,7 +1395,11 @@ export function apply(ctx: Context, config: Config) {
       })
       // P0-1 交接：收尾事件是 handoff 的主路径（命令只是手动覆盖），见设计 §1.4b.7
       if (!s.getSessionIsolation(sid)) {
-        createCloseOutHandoff(s, sid, { projectKey })
+        createCloseOutHandoff(s, sid, {
+          projectKey,
+          taskId: process.env.THREAD_TASK_ID,
+          fromRole: process.env.THREAD_ROLE,
+        })
       }
     } catch (err) {
       console.error(`thread dsh: dispose sediment failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -1456,7 +1500,12 @@ export function apply(ctx: Context, config: Config) {
         try {
           const handoffKey = `handoffDelivered:${String(sessionId)}`
           if (s.getMeta(handoffKey) === undefined) {
-            const pending = s.listHandoffs({ projectKey, status: 'pending', limit: 1 })
+            const pending = s.listHandoffs({
+              projectKey,
+              status: 'pending',
+              limit: 1,
+              ...(process.env.THREAD_ROLE ? { toRole: process.env.THREAD_ROLE } : {}),
+            })
             const latest = pending[0]
             if (latest !== undefined) {
               payload.agent.inject(createUserMessage({

@@ -4,9 +4,14 @@
 //（实测一次列出 20 个跨项目会话），结构化合并视图的项目过滤也整体空转。
 import {
   ThreadStore,
+  ackHandoff,
   deriveProjectKey,
   hashProjectKey,
   locateSession,
+  nextHandoff,
+  parseBrief,
+  proposeHandoff,
+  renderBrief,
   runQueryTool,
   threadRoot,
   THREAD_VERSION,
@@ -124,6 +129,80 @@ server.tool(
     return {
       content: [{ type: "text" as const, text: note + result.text }],
     };
+  },
+);
+
+server.tool(
+  "propose_handoff",
+  [
+    "提议一条交接：把本会话的目标/决策/未决/下一步/产物摘要交给下一个会话（可选指定目标角色）。",
+    "用于跨会话同步结论（如调研会话 → 开发会话）。只做交接，不做调度；同目标重复提议幂等。",
+  ].join("\n"),
+  {
+    session_id: z.string().optional().describe("来源会话 id；缺省使用最近活跃会话"),
+    to_role: z.string().optional().describe("目标角色（analysis/dev/test/supervisor）；不给则按 project 寻址，任意下一会话可收到"),
+    goal: z.string().optional().describe("一句话目标；缺省取本会话生效目标"),
+    next: z.array(z.string()).optional().describe("下一步（不超过 3 条）"),
+    artifacts: z.array(z.string()).optional().describe("产物指针（文件路径；不塞全文）"),
+    open: z.array(z.string()).optional().describe("未决问题"),
+  },
+  async (args) => {
+    const requested = args.session_id === undefined ? undefined : String(args.session_id);
+    const scope = (requested === undefined ? undefined : findBucketForSession(requested)) ?? defaultBucket();
+    const store = storeFor(scope);
+    const handoff = proposeHandoff(
+      store,
+      requested ?? store.getRecentSessionId() ?? "",
+      {
+        ...(args.to_role === undefined ? {} : { toRole: args.to_role }),
+        ...(args.goal === undefined ? {} : { goal: args.goal }),
+        ...(args.next === undefined ? {} : { next: args.next }),
+        ...(args.artifacts === undefined ? {} : { artifacts: args.artifacts }),
+        ...(args.open === undefined ? {} : { open: args.open }),
+      },
+      { projectKey: scope.projectKey, taskId: process.env.THREAD_TASK_ID, fromRole: process.env.THREAD_ROLE },
+    );
+    return { content: [{ type: "text" as const, text: renderBrief(parseBrief(handoff.brief_json), handoff.id) }] };
+  },
+);
+
+server.tool(
+  "handoff_next",
+  [
+    "编排器动词：取走该 task/role 的一条待投递交接（结构化 brief），不改状态。",
+    "Thread 只做交接、不做调度——它不启动任何会话。",
+  ].join("\n"),
+  {
+    task_id: z.string().optional().describe("任务 id（编排器启动会话时声明）；缺省按 project 寻址"),
+    role: z.string().optional().describe("目标角色；缺省取按 project 寻址的交接"),
+  },
+  async (args) => {
+    const scope = defaultBucket();
+    const store = storeFor(scope);
+    const next = nextHandoff(store, {
+      projectKey: scope.projectKey,
+      ...(args.task_id === undefined ? {} : { taskId: args.task_id }),
+      ...(args.role === undefined ? {} : { role: args.role }),
+    });
+    return {
+      content: [{
+        type: "text" as const,
+        text: next === null
+          ? JSON.stringify({ status: "not-found" }, null, 2)
+          : JSON.stringify({ id: next.handoff.id, status: next.handoff.status, brief: next.brief }, null, 2),
+      }],
+    };
+  },
+);
+
+server.tool(
+  "handoff_ack",
+  "编排器动词：确认已消费某条交接（推进为 ack）。",
+  { id: z.number().int().positive().describe("交接 id") },
+  async (args) => {
+    const store = storeFor(defaultBucket());
+    const ok = ackHandoff(store, args.id);
+    return { content: [{ type: "text" as const, text: JSON.stringify({ ok, id: args.id }, null, 2) }] };
   },
 );
 
