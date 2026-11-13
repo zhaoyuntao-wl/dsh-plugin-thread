@@ -25,6 +25,7 @@ import {
   proposeHandoff,
   recordInjection,
   renderPanel,
+  verifyRegistered,
   renderBrief,
   renderStateDelta,
   runQueryTool,
@@ -1504,6 +1505,16 @@ export function apply(ctx: Context, config: Config) {
         projectKey,
         isolation: s.getSessionIsolation(sid),
       })
+      // 证据自动取证（P0-2）：离线模式没人"记得"跑 verify，交接前由系统重跑已登记条目，
+      // 让交接里的「验收 X/Y 已证」是刚测出来的，而不是上一轮的旧结论。
+      try {
+        const report = verifyRegistered(s, { projectKey, sessionId: sid, cwd: resolveSessionCwd(session) ?? fallbackCwd })
+        if (report !== undefined) {
+          console.error(`thread dsh: auto-verify on close: ${report.passed}/${report.total}`)
+        }
+      } catch (err) {
+        console.error(`thread dsh: auto-verify failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
       // P0-1 交接：收尾事件是 handoff 的主路径（命令只是手动覆盖），见设计 §1.4b.7
       if (!s.getSessionIsolation(sid)) {
         createCloseOutHandoff(s, sid, {

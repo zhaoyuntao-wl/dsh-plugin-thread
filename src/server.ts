@@ -16,6 +16,7 @@ import {
   renderEvidenceLine,
   progressFor,
   verifyCriteria,
+  verifyRegistered,
   runQueryTool,
   threadRoot,
   THREAD_VERSION,
@@ -238,7 +239,8 @@ server.tool(
           cwd: z.string().optional(),
         }),
       )
-      .describe("验收条目列表"),
+      .optional()
+      .describe("验收条目列表；省略则自动重跑本项目已登记的条目"),
     session_id: z.string().optional().describe("会话 id；缺省用最近活跃会话"),
   },
   async (args) => {
@@ -247,13 +249,16 @@ server.tool(
     const store = storeFor(scope);
     const projectKey = scope.projectKey ?? deriveProjectKey(process.env.THREAD_CWD ?? process.cwd());
     const sessionId = requested ?? store.getRecentSessionId() ?? "mcp-verify";
-    const report = verifyCriteria(store, {
-      projectKey,
-      sessionId,
-      criteria: args.criteria,
-      cwd: process.env.THREAD_CWD ?? process.cwd(),
-    });
+    const cwd = process.env.THREAD_CWD ?? process.cwd();
+    const report = args.criteria === undefined || args.criteria.length === 0
+      ? verifyRegistered(store, { projectKey, sessionId, cwd })
+      : verifyCriteria(store, { projectKey, sessionId, criteria: args.criteria, cwd });
     const progress = progressFor(store, projectKey);
+    if (report === undefined) {
+      return {
+        content: [{ type: "text" as const, text: `${renderEvidenceLine(progress)}\n（本项目还没有登记过带命令的验收条目；先调用一次 verify 并给出 criteria）` }],
+      };
+    }
     return {
       content: [
         {
