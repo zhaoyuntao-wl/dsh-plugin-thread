@@ -1,6 +1,6 @@
 {
   "name": "dsh-thread",
-  "version": "1.11.2",
+  "version": "1.11.3",
   "description": "Thread session memory for dsh 鈥?lossless event capture + status-card injection (dsh plugin, standalone repo).",
   "license": "MIT",
   "type": "module",
