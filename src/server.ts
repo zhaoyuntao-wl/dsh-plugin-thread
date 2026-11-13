@@ -12,6 +12,7 @@ import {
   parseBrief,
   proposeHandoff,
   renderBrief,
+  renderPanel,
   runQueryTool,
   threadRoot,
   THREAD_VERSION,
@@ -203,6 +204,22 @@ server.tool(
     const store = storeFor(defaultBucket());
     const ok = ackHandoff(store, args.id);
     return { content: [{ type: "text" as const, text: JSON.stringify({ ok, id: args.id }, null, 2) }] };
+  },
+);
+
+server.tool(
+  "thread_panel",
+  "只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件。给编排器与演示用，纯文本、不改状态。",
+  {
+    session_id: z.string().optional().describe("会话 id；缺省用最近活跃会话"),
+    limit: z.number().int().positive().max(20).optional().describe("每个区块最多几行，默认 5"),
+  },
+  async (args) => {
+    const requested = args.session_id === undefined ? undefined : String(args.session_id);
+    const scope = (requested === undefined ? undefined : findBucketForSession(requested)) ?? defaultBucket();
+    const store = storeFor(scope);
+    const sid = requested ?? store.getRecentSessionId() ?? "";
+    return { content: [{ type: "text" as const, text: renderPanel(store, { sessionId: sid, ...(args.limit === undefined ? {} : { limit: args.limit }) }) }] };
   },
 );
 

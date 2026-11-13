@@ -20,6 +20,7 @@ import {
   parseBrief,
   parseToolArgs,
   proposeHandoff,
+  renderPanel,
   renderBrief,
   renderStateDelta,
   runQueryTool,
@@ -506,6 +507,11 @@ function registerThreadCommands(
       text = t
     })
     return text
+  })
+
+  reg('thread-panel', '只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件', '', (inv) => {
+    const sid = sessionIdOf(inv)
+    return renderPanel(deps.storeFor(sid), { sessionId: sid })
   })
 
   reg('thread-handoff', '收尾生成一条交接（可选目标角色/会话；无参按 project 寻址）', '[target]', (inv) => {
