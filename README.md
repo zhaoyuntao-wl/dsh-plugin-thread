@@ -75,12 +75,13 @@ end to end.
   of the same machine share the same store, and offline sessions behave
   identically.
 
-- **Verified**: dsh **0.2.0-rc.2** (current; the CLI and its SDK sub-packages ship
+- **Verified**: dsh **0.2.2-rc.1** (current; the CLI and its SDK sub-packages ship
   version-locked). **0.1.x is no longer declared** — dsh 0.2.0 replaced the shared
   `plugin` message source with per-producer `MessageSourceMap` kinds, which this
   plugin now declares; 0.1.x users should stay on `dsh-thread@1.2.x`.
-- The plugin pins its SDK peers to `^0.2.0-rc.2`
-  (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`); every upgrade is
+- The plugin pins its SDK peers to `^0.2.2-rc.1`
+  (`dsh-tools`/`dsh-agent`/`dsh-session`/`dsh-user-questions`) and `@deepseek-ai/cordis`
+  to `^4.1.0` (dsh 0.2.2-rc.1 pins cordis at `~4.1.0`); every upgrade is
   verified by an isolated contract probe (type-level compile against the released
   SDK plus a live headless profile run) and the CI compat matrix
   (`.github/workflows/ci.yml`) before this table is updated.
