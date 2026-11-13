@@ -88,7 +88,7 @@ end to end.
   used for contract smoke-testing during development; it is inert unless
   `THREAD_B0_PROBE=1` is set, so normal sessions are unaffected.
 
-> Full user guide: [manual (zh-CN)](./docs/manual.zh-CN.md).
+> Full user guide: [English](./docs/manual.md) · [中文](./docs/manual.zh-CN.md).
 
 ## Supported dsh versions
 

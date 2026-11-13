@@ -22,7 +22,7 @@ Thread 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 - **会话隔离**——`/thread-iso` / `/thread-uniso`；`/thread-pub <ast|dec|fdb|gol> <ids|all>` 把隔离期产生的行转共享。
 - **可选主动压缩**——`THREAD_AUTO_COMPACT=1` 时插件在回合边界监控 token 压力并静默触发 `compactNow`；无论哪种方式压缩，状态都会在压缩后重锚定。
 
-> 完整使用说明见 [使用手册](./docs/manual.zh-CN.md)。
+> 完整使用说明：[中文手册](./docs/manual.zh-CN.md) · [English](./docs/manual.md)。
 
 ## 支持的 dsh 版本
 
