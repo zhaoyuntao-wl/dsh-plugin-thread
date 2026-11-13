@@ -456,11 +456,18 @@ interface CommandRuntimeLike {
 
 // dsh 真命令注册（2026-08-20）：命令面板/斜杠补全/直接执行，handler 文本由 UI 直接呈现。
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
+// 会话 → 桶路径缓存：面板每次全桶扫描在桶数上百时会慢，命中过就不再重复扫。
+const sessionBucketCache = new Map<string, string>()
+
 // 在磁盘上找会话所在的桶（不依赖进程内缓存）：给了 sid 就按 sid 匹配，否则取最新事件所在桶。
 // 命令 handler 与 agent/pre-step 的 scope 缓存不共享，按缓存解析会落到 fallback 空桶（2026-11-13 五轮实测）。
 function sessionBucketOnDisk(sessionId?: string): { sessionId: string; eventsPath: string } | undefined {
   const root = threadRoot()
   const structuredPath = join(root, 'structured.db')
+  const cached = sessionId === undefined ? undefined : sessionBucketCache.get(sessionId)
+  if (cached !== undefined && existsSync(cached) && sessionId !== undefined) {
+    return { sessionId, eventsPath: cached }
+  }
   let best: { sessionId: string; eventsPath: string; ts: string } | undefined
   let dirs: string[] = []
   try {
@@ -482,7 +489,10 @@ function sessionBucketOnDisk(sessionId?: string): { sessionId: string; eventsPat
       if (row?.session_id && row.ts && (best === undefined || row.ts > best.ts)) {
         best = { sessionId: row.session_id, eventsPath, ts: row.ts }
       }
-      if (sessionId !== undefined && row?.session_id) break
+      if (sessionId !== undefined && row?.session_id) {
+        sessionBucketCache.set(sessionId, eventsPath)
+        break
+      }
     } catch {
       // 单桶失败不影响其他桶
     }
@@ -514,6 +524,7 @@ function renderPanelFromDisk(sessionId?: string): string | undefined {
 
 // timed 变体的超时结果带固定文案（来源：@deepseek-ai/dsh-tool-ask-user 的 pendingNotice）。
 // 用文案而非关键字猜测做判定：这是 dsh 自己写进结果的说明字段，属确定性标记。
+// 维护提醒：dsh 升级后若判定失效（超时被记成"已回答"），先 `grep pendingNotice <dsh>/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js` 复核文案是否变了。
 export const TIMED_OUT_NOTICE = 'No answer batch arrived before the timeout'
 
 export function isTimedOutResult(body: string): boolean {
@@ -928,6 +939,12 @@ export function apply(ctx: Context, config: Config) {
         situation: 'normal',
       })
       injectFromEvent(sessionId, `${prefix}\n${card}`)
+      // 回执（P0-0）：刷新也是"这一轮喂了什么"，不记就等于面板看不见
+      try {
+        recordInjection(s, sessionId, { kind: 'status-card', summary: `${prefix} ${card.length} 字符` })
+      } catch (err) {
+        console.error(`thread dsh: receipt write failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
     } catch (err) {
       console.error(`thread dsh: status card refresh failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -1364,6 +1381,13 @@ export function apply(ctx: Context, config: Config) {
             })
             if (applied.goals.length > 0 || completionHit) {
               injectStatusCardRefresh(sessionId)
+            }
+            // 门禁拒绝回告（P0-2）：用户说"完成了"但证据不足时，必须说清缺什么，不能静默
+            if (applied.blockedCompletions !== undefined && applied.blockedCompletions.length > 0) {
+              const detail = applied.blockedCompletions
+                .map((b) => `#${b.goalId} 缺 ${b.missing.join('、') || '验收证据'}`)
+                .join('；')
+              injectFromEvent(sessionId, `[Thread 证据门] 目标未标完成：${detail}。先跑 verify 取证，再标完成。`)
             }
           }
           // 收尾词标记（1.2）：turn/end 时沉淀
