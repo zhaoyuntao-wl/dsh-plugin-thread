@@ -511,8 +511,11 @@ function registerThreadCommands(
   })
 
   reg('thread-panel', '只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件', '', (inv) => {
-    const sid = sessionIdOf(inv)
-    return renderPanel(deps.storeFor(sid), { sessionId: sid })
+    const s = deps.storeFor(sessionIdOf(inv) || '')
+    // 命令上下文可能拿不到 agent.session（实测 sid 为空）→ 退回该库最近活跃会话，
+    // 否则面板会显示"目标 0 / 事件 0"，只剩项目共享决策。
+    const sid = sessionIdOf(inv) || s.getRecentSessionId() || ''
+    return renderPanel(s, { sessionId: sid })
   })
 
   reg('thread-handoff', '收尾生成一条交接（可选目标角色/会话；无参按 project 寻址）', '[target]', (inv) => {
