@@ -435,7 +435,7 @@ describe("renderResourceList / renderCfmList / renderIsolatedRows（id 可见来
       const text = renderCfmList(store, "s1", "demo");
       expect(text).toContain("t#1 [待办] 待办 A");
       expect(text).toContain("c#1 [候选决策] 候选 A");
-      expect(text).toContain("/thread-cfm do q#<id>");
+      expect(text).toContain("/thread-cfm do <id>");
       // 清空后空收件箱提示
       handleCfmCommand(store, "s1", { action: "cnl-all" }, { projectKey: "demo" }, () => {});
       expect(renderCfmList(store, "s1", "demo")).toContain("无待处理事项");
