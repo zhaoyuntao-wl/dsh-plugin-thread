@@ -31,7 +31,7 @@ dsh plugin add dsh-thread@latest   # upgrade (core follows via ^1.0.0)
 Restart dsh afterwards; the session log should show:
 
 ```
-[dsh-thread] thread core v1.6.0
+[dsh-thread] thread core v1.6.1
 ```
 
 Check the [compatibility table](./README.md#supported-dsh-versions) before upgrading dsh itself.
@@ -67,12 +67,13 @@ modules and fails at startup with `ERR_MODULE_NOT_FOUND`.
 
 ## 4. Reading the panel
 
-`/thread-panel` and the MCP tool `thread_panel` render the same content, scoped to a **session**:
+`/thread-panel` and the MCP tool `thread_panel` render the same content, scoped to the
+**session merged with its project**:
 
 | Section | Meaning | Why it can be empty |
 |---|---|---|
 | Goals | active goals for this session + project-level | the project really has no active goal |
-| Decision chain | active decisions, incl. `superseded → #id` | nothing recorded yet |
+| Decision chain | active decisions of this session + same-project project-level ones, incl. `superseded → #id` | nothing recorded in this project yet |
 | Open items | pending candidates + `proposed` decisions | no candidates |
 | **Last injection** | receipt of the most recent injection (time / kind / summary) | no injection has happened in this session yet (a new session gets one on turn 1) |
 | Open questions | unanswered `ask_user_question` rows + closed history | the tool was never used |
@@ -81,7 +82,9 @@ modules and fails at startup with `ERR_MODULE_NOT_FOUND`.
 | Recent events | last 5 events | a brand-new session |
 
 **Scoping**: the panel finds the session's project bucket on disk, so it works from a command
-context that never saw the agent object. Cross-project leakage does not happen.
+context that never saw the agent object. Goals and decisions are merged with the project (the same
+merge the status card uses) — only the event list and the injection receipt are session-only.
+Cross-project leakage does not happen.
 
 ---
 

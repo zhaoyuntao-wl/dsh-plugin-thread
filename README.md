@@ -42,7 +42,10 @@ end to end.
 - **Read-only panel — what the model believes, on demand** — `/thread-panel`
   (and the `thread_panel` MCP tool) renders goals, the decision chain with
   supersession, open items, handoffs, the last injection receipt, acceptance
-  evidence and recent events, scoped to a session. The receipt line answers
+  evidence and recent events. Scope is the session **merged with its project**:
+  decisions and goals registered by other sessions in the same project show up
+  too, so a brand-new session is not blind to what the project already decided
+  (it reads the same merge the status card uses). The receipt line answers
   “what exactly was fed to the model this round”; the panel resolves the
   session's project bucket from disk, so it works from a command context that
   never saw the agent object.
