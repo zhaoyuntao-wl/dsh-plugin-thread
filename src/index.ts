@@ -12,12 +12,15 @@ import {
   buildStatusCard,
   classifyReportEvent,
   classifyWriteEvent,
+  createCloseOutHandoff,
   detectGoalCompletion,
   detectSituation,
   extractTitleFromContent,
   getStateDelta,
   matchToolFeedback,
+  parseBrief,
   parseToolArgs,
+  renderBrief,
   renderStateDelta,
   runQueryTool,
   sedimentClosingTodos,
@@ -503,6 +506,21 @@ function registerThreadCommands(
       text = t
     })
     return text
+  })
+
+  reg('thread-handoff', '收尾生成一条交接（可选目标角色/会话；无参按 project 寻址）', '[target]', (inv) => {
+    const sid = sessionIdOf(inv)
+    const s = deps.storeFor(sid)
+    const target = inv.rawInput.trim()
+    const handoff = createCloseOutHandoff(s, sid, {
+      projectKey: s.projectKey,
+      ...(target ? { toRole: target } : {}),
+    })
+    if (handoff === null) {
+      return '[Thread] 没有可交接的内容（无生效决策、待办或产物）。'
+    }
+    deps.refreshCard(sid)
+    return `[Thread 交接 #${handoff.id}] ${parseBrief(handoff.brief_json).goal}\n细节：query_session_memory kind=handoff id=${handoff.id}`
   })
 
   reg('thread-cfm', '待处理收件箱（待办 t# + 候选 c#；无参 = 列收件箱）', '[无参列收件箱 | do <id> [text] | cnl <id> | cnl all]', (inv) => {
@@ -1335,6 +1353,10 @@ export function apply(ctx: Context, config: Config) {
         projectKey,
         isolation: s.getSessionIsolation(sid),
       })
+      // P0-1 交接：收尾事件是 handoff 的主路径（命令只是手动覆盖），见设计 §1.4b.7
+      if (!s.getSessionIsolation(sid)) {
+        createCloseOutHandoff(s, sid, { projectKey })
+      }
     } catch (err) {
       console.error(`thread dsh: dispose sediment failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -1430,6 +1452,24 @@ export function apply(ctx: Context, config: Config) {
       // 轻确认弹窗（§1.5.3d 通道一）：本会话有待确认的决策候选（未提示过）→ 弹窗问用户
       // 选项：确认（转正）/ 取消（丢弃）/ 推迟（保持 pending 等唤醒）；不阻塞 pre-step（fire-and-forget）
       if (!s.getSessionIsolation(String(sessionId))) {
+        // P0-1 交接投递：本会话首个 turn 注入一条待投递 brief（一次、幂等），并标记 delivered
+        try {
+          const handoffKey = `handoffDelivered:${String(sessionId)}`
+          if (s.getMeta(handoffKey) === undefined) {
+            const pending = s.listHandoffs({ projectKey, status: 'pending', limit: 1 })
+            const latest = pending[0]
+            if (latest !== undefined) {
+              payload.agent.inject(createUserMessage({
+                content: [{ type: 'text', text: renderBrief(parseBrief(latest.brief_json), latest.id) }],
+                source: { kind: THREAD_SOURCE_KIND, form: 'instructions' },
+              }))
+              s.setHandoffStatus(latest.id, 'delivered')
+            }
+            s.setMeta(handoffKey, new Date().toISOString())
+          }
+        } catch (err) {
+          console.error(`thread dsh: handoff injection failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
         void promptPendingCandidates(ctx, s, String(sessionId), projectKey)
       }
     } catch (err) {
