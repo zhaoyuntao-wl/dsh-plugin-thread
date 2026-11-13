@@ -12,8 +12,8 @@ importers:
         specifier: ^1.30.0
         version: 1.30.0(zod@4.4.3)
       '@thread-memory/core':
-        specifier: ^1.5.0
-        version: 1.5.0
+        specifier: ^1.5.1
+        version: 1.5.1
       better-sqlite3:
         specifier: ^12.0.0
         version: 12.11.1
@@ -819,8 +819,8 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@thread-memory/core@1.5.0':
-    resolution: {integrity: sha512-6A8QaGbgzTXhVM45wDPK9ibyKaDPk+JDwBvRuIpQ+TiPUX6lRTfc0NkSEAHfRMkgCGhsB8izcdnpbfeKA2NRPw==}
+  '@thread-memory/core@1.5.1':
+    resolution: {integrity: sha512-Evg5lZSrfR8E9ItphLy3iDpHyxvqiQxc5MWncUqG7QiBiDFx8N24NANN00mvlkIdaKRqluHWJs5YHBoHXt7bSA==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -2708,7 +2708,7 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@thread-memory/core@1.5.0':
+  '@thread-memory/core@1.5.1':
     dependencies:
       '@node-rs/jieba': 2.0.2
       better-sqlite3: 12.11.1
