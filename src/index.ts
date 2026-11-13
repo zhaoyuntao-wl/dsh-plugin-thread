@@ -942,7 +942,7 @@ export function apply(ctx: Context, config: Config) {
       target: { type: 'string', description: '导航目标（会话 id / asset id / 文档路径）' },
       limit: { type: 'integer', description: '最大返回片段数' },
       session_id: { type: 'string', description: '会话 ID；缺省使用最近活跃会话' },
-      kind: { type: 'string', enum: ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'compact_checkpoint', 'goal', 'decision', 'feedback'], description: '按类型过滤：事件类或结构化表类 goal/decision/feedback' },
+      kind: { type: 'string', enum: ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'compact_checkpoint', 'goal', 'decision', 'feedback', 'handoff'], description: '按类型过滤：事件类或结构化表类 goal/decision/feedback；handoff 列待投递交接（配 target=<id> 取结构化 brief）' },
       since: { type: 'string', description: '时间下界 ISO（精确查询路径）' },
       until: { type: 'string', description: '时间上界 ISO（精确查询路径）' },
       order: { type: 'string', enum: ['asc', 'desc'], description: '排序方向，默认 desc' },

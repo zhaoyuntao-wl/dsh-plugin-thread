@@ -93,7 +93,7 @@ server.tool(
     token_budget: z.number().int().positive().optional().describe("返回结果 token 预算，默认 4000"),
     session_id: z.string().optional().describe("会话 ID；缺省使用最近活跃会话"),
     limit: z.number().int().positive().max(50).optional().describe("最大返回片段数，默认 20"),
-    kind: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "compact_checkpoint", "goal", "decision", "feedback"]).optional().describe("按类型过滤：事件类（精确查询路径）或结构化表类 goal/decision/feedback（目标/决策/偏好行）"),
+    kind: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "compact_checkpoint", "goal", "decision", "feedback", "handoff"]).optional().describe("按类型过滤：事件类（精确查询路径）或结构化表类 goal/decision/feedback（目标/决策/偏好行）；handoff 列待投递交接（配 target=<id> 取结构化 brief）"),
     since: z.string().optional().describe("时间下界 ISO（精确查询路径，如 '2026-08-14T01:00:00Z'；结构化表类忽略）"),
     until: z.string().optional().describe("时间上界 ISO（精确查询路径；结构化表类忽略）"),
     order: z.enum(["asc", "desc"]).optional().describe("排序方向，默认 desc（最近优先）"),
