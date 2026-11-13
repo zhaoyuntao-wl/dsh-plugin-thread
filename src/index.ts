@@ -452,12 +452,13 @@ interface CommandRuntimeLike {
 
 // dsh 真命令注册（2026-08-20）：命令面板/斜杠补全/直接执行，handler 文本由 UI 直接呈现。
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
-// 最近一次 pre-step 见到的会话 id：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
+// 最近一次 pre-step 见到的会话 id + 项目键：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
 let lastActiveSessionId = ''
+let lastActiveProjectKey = ''
 
 function registerThreadCommands(
   ctx: Context,
-  deps: { storeFor: (sessionId: string) => ThreadStore; projectKeyOf: (sessionId: string) => string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
+  deps: { storeFor: (sessionId: string) => ThreadStore; storeForProjectKey: (projectKey: string) => ThreadStore; projectKeyOf: (sessionId: string) => string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
 ): void {
   const commands = ctx.get?.('commands') as CommandRuntimeLike | undefined
   if (!commands) {
@@ -514,9 +515,10 @@ function registerThreadCommands(
   })
 
   reg('thread-panel', '只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件', '', (inv) => {
-    // 命令上下文可能没有 agent.session（实测 sid 为空）→ 用 pre-step 记下的最近活跃会话。
+    // 命令上下文没有 agent.session（实测）→ 用 pre-step 记下的会话 id 与项目键；
+    // 项目键必须来自会话而非 fallback，否则会落到空桶（事件 0、回执查不到）。
     const sid = sessionIdOf(inv) || lastActiveSessionId
-    const s = deps.storeFor(sid)
+    const s = lastActiveProjectKey ? deps.storeForProjectKey(lastActiveProjectKey) : deps.storeFor(sid)
     return renderPanel(s, { sessionId: sid })
   })
 
@@ -1104,7 +1106,7 @@ export function apply(ctx: Context, config: Config) {
   // dsh 真命令注册（2026-08-20 用户定：命令发现性不能只靠 README/状态卡——状态卡面向模型）。
   // ctx.commands.register → 命令面板/斜杠补全/直接执行（不经模型一轮）；handler 返回文本由 UI 直接呈现。
   // 消息白名单解析保留为回退（headless / 无命令 UI 的底座；web 命令被命令系统拦截不会到达 user/message，无双触发）。
-  registerThreadCommands(ctx, { storeFor, projectKeyOf, busyRetries, busyRetryDelayMs, refreshCard: injectStatusCardRefresh })
+  registerThreadCommands(ctx, { storeFor, storeForProjectKey: storeFor, projectKeyOf, busyRetries, busyRetryDelayMs, refreshCard: injectStatusCardRefresh })
 
   // B⑥-② 反馈拦截：tools/pre-execute 后同步守卫——反馈表命中教训即拒绝（零 LLM、确定性）。
   // 官方 ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined；
@@ -1446,6 +1448,7 @@ export function apply(ctx: Context, config: Config) {
       const sessionId = payload.agent.session?.id ?? ''
       // 命令上下文拿不到 agent.session（实测），记下最近活跃会话供 /thread-panel 等命令兜底
       if (String(sessionId) !== '') lastActiveSessionId = String(sessionId)
+      lastActiveProjectKey = projectKey
       // G5 跨会话 delta（2.3.2）：回合边界水位判定，他代理有新决策/目标/偏好/候选变更才注入
       if (sessionId && !s.getSessionIsolation(String(sessionId))) {        try {
           const key = `lastDeltaAt:${String(sessionId)}`
