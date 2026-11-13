@@ -161,6 +161,44 @@ messages where no command UI exists. One grammar, six commands:
 | `/thread-iso` / `/thread-uniso` | Silence / restore a session |
 | `/thread-pub` | List isolated rows (all resources, ids for sharing) |
 | `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | Share isolated rows |
+| `/thread-handoff [target]` | Produce a handoff from this session's state (optional target role; no target = project-addressed) |
+
+## Handoffs (for orchestrators)
+
+Thread carries *state* across sessions: a finishing session leaves a compact
+brief — goal, up to three active decisions, open items, next steps, artifact
+pointers — and the receiving session starts with it instead of rediscovering it.
+
+Thread does **not** schedule, launch, or retry anything. It is the state base
+your orchestrator sits on, not another orchestrator.
+
+```js
+// start a worker with two extra fields
+env: { THREAD_TASK_ID: taskId, THREAD_ROLE: "dev" }
+
+// claim the handoff addressed to that task/role (atomic; marks it delivered)
+const { content } = await mcp.callTool({ name: "handoff_next", arguments: { task_id: taskId, role: "dev" } });
+// → { id, status, brief: { goal, decisions[], open[], next[], artifacts[], conditions[] } }
+
+// acknowledge once consumed
+await mcp.callTool({ name: "handoff_ack", arguments: { id } });
+```
+
+Guarantees: claiming is a single `UPDATE … RETURNING` (two workers never get the
+same row), producing is idempotent per goal, `ack` is idempotent, lookups are
+project-scoped, and any handoff failure fails open so the agent path never
+blocks. The brief carries pointers only — documents stay the artifact layer.
+
+Measured (2026-11-13, three arms × 5 runs, empty workspace, same memory):
+
+| | handoff pushed | memory only | no Thread |
+|---|---|---|---|
+| recalls the earlier decision | **5/5** | 5/5 | 1/5 |
+| follows the producer's chosen next step | **5/5** | **0/5** | 0/5 |
+| lookups by the receiving agent | **1.0** | 6.8 | 4.2 |
+| mean wall time | **7s** | 15s | 12s |
+
+Details: [Thread docs — handoff](https://github.com/zhaoyuntao-wl/Thread/blob/main/docs/design/handoff.md).
 
 ## MCP fallback
 

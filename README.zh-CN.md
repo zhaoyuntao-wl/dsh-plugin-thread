@@ -92,6 +92,38 @@ dsh 插件需在 profile 的 `bundles` 中引用才生效。在
 | `/thread-iso` / `/thread-uniso` | 隔离 / 解除会话 |
 | `/thread-pub` | 列出隔离行（全部资源，id 来源） |
 | `/thread-pub <ast\|dec\|fdb\|gol> <ids\|all>` | 隔离行转共享 |
+| `/thread-handoff [target]` | 按本会话状态生成一条交接（可指定目标角色；不带参数按项目寻址） |
+
+## 交接（给编排器）
+
+Thread 负责把**状态**跨会话带过去：收尾的会话留下一条紧凑 brief（目标、至多三条生效决策、未决项、下一步、产物指针），接手的会话开局就带着它，不用从头摸索。
+
+Thread **不做调度、不启动会话、不重试**——它是编排器脚下的状态底座，不是又一个编排器。
+
+```js
+// 启动 worker 时多给两个字段
+env: { THREAD_TASK_ID: taskId, THREAD_ROLE: "dev" }
+
+// 领取寻址到该 task/role 的交接（原子；领取即 delivered）
+const { content } = await mcp.callTool({ name: "handoff_next", arguments: { task_id: taskId, role: "dev" } });
+// → { id, status, brief: { goal, decisions[], open[], next[], artifacts[], conditions[] } }
+
+// 消费完确认
+await mcp.callTool({ name: "handoff_ack", arguments: { id } });
+```
+
+契约保证：领取是单条 `UPDATE … RETURNING`（两个 worker 不会拿到同一条）；同一目标重复生成幂等；`ack` 幂等；查询按项目键隔离；交接相关失败一律 fail-open，不阻塞 agent 主路径；brief 只放指针，正文留在文档层。
+
+实测（2026-11-13，三臂 × 5 次，空工作区，同一份记忆）：
+
+| | 推送交接 | 仅记忆 | 无 Thread |
+|---|---|---|---|
+| 召回前序已定方案 | **5/5** | 5/5 | 1/5 |
+| 采用生产者策展的下一步 | **5/5** | **0/5** | 0/5 |
+| 接手方查询次数 | **1.0** | 6.8 | 4.2 |
+| 平均耗时 | **7s** | 15s | 12s |
+
+细节见 [Thread 交接文档](https://github.com/zhaoyuntao-wl/Thread/blob/main/docs/design/handoff.md)。
 
 ## MCP 回退
 

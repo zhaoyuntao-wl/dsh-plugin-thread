@@ -169,8 +169,8 @@ server.tool(
 server.tool(
   "handoff_next",
   [
-    "编排器动词：取走该 task/role 的一条待投递交接（结构化 brief），不改状态。",
-    "Thread 只做交接、不做调度——它不启动任何会话。",
+    "编排器动词：原子领取该 task/role 的一条待投递交接（领取即 delivered），返回结构化 brief。",
+    "两个 worker 并发调用不会拿到同一条；Thread 只做交接、不做调度——它不启动任何会话。",
   ].join("\n"),
   {
     task_id: z.string().optional().describe("任务 id（编排器启动会话时声明）；缺省按 project 寻址"),
