@@ -452,6 +452,9 @@ interface CommandRuntimeLike {
 
 // dsh 真命令注册（2026-08-20）：命令面板/斜杠补全/直接执行，handler 文本由 UI 直接呈现。
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
+// 最近一次 pre-step 见到的会话 id：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
+let lastActiveSessionId = ''
+
 function registerThreadCommands(
   ctx: Context,
   deps: { storeFor: (sessionId: string) => ThreadStore; projectKeyOf: (sessionId: string) => string; busyRetries: number; busyRetryDelayMs: number; refreshCard: (sessionId: string) => void },
@@ -511,10 +514,9 @@ function registerThreadCommands(
   })
 
   reg('thread-panel', '只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件', '', (inv) => {
-    const s = deps.storeFor(sessionIdOf(inv) || '')
-    // 命令上下文可能拿不到 agent.session（实测 sid 为空）→ 退回该库最近活跃会话，
-    // 否则面板会显示"目标 0 / 事件 0"，只剩项目共享决策。
-    const sid = sessionIdOf(inv) || s.getRecentSessionId() || ''
+    // 命令上下文可能没有 agent.session（实测 sid 为空）→ 用 pre-step 记下的最近活跃会话。
+    const sid = sessionIdOf(inv) || lastActiveSessionId
+    const s = deps.storeFor(sid)
     return renderPanel(s, { sessionId: sid })
   })
 
@@ -1442,6 +1444,8 @@ export function apply(ctx: Context, config: Config) {
       const projectKey = projectKeyForSession(agentSession)
       const s = storeFor(projectKey)
       const sessionId = payload.agent.session?.id ?? ''
+      // 命令上下文拿不到 agent.session（实测），记下最近活跃会话供 /thread-panel 等命令兜底
+      if (String(sessionId) !== '') lastActiveSessionId = String(sessionId)
       // G5 跨会话 delta（2.3.2）：回合边界水位判定，他代理有新决策/目标/偏好/候选变更才注入
       if (sessionId && !s.getSessionIsolation(String(sessionId))) {        try {
           const key = `lastDeltaAt:${String(sessionId)}`
