@@ -454,10 +454,10 @@ interface CommandRuntimeLike {
 // rawInput = 命令名后的原文（含分隔空白）→ 重建完整行复用现有白名单解析器（单一解析来源）。
 // 从磁盘找最近活跃会话（不依赖进程内状态）：扫描 projects/*/events.db 取最新一条事件。
 // 命令 handler 与 agent/pre-step 可能不在同一进程（或本进程尚未跑过 pre-step），内存兜底不可靠。
-function latestSessionOnDisk(): { sessionId: string; projectKey: string } | undefined {
+function latestSessionOnDisk(): { sessionId: string; eventsPath: string } | undefined {
   const root = threadRoot()
   const structuredPath = join(root, 'structured.db')
-  let best: { sessionId: string; projectKey: string; ts: string } | undefined
+  let best: { sessionId: string; eventsPath: string; ts: string } | undefined
   let dirs: string[] = []
   try {
     dirs = readdirSync(join(root, 'projects'))
@@ -470,17 +470,17 @@ function latestSessionOnDisk(): { sessionId: string; projectKey: string } | unde
     try {
       const probe = new ThreadStore({ eventsPath, structuredPath, projectKey: '' })
       const row = probe.eventsDb
-        .prepare('SELECT session_id, project_key, ts FROM events WHERE session_id IS NOT NULL ORDER BY ts DESC LIMIT 1')
-        .get() as { session_id?: string; project_key?: string; ts?: string } | undefined
+        .prepare('SELECT session_id, ts FROM events WHERE session_id IS NOT NULL ORDER BY ts DESC LIMIT 1')
+        .get() as { session_id?: string; ts?: string } | undefined
       probe.close()
       if (row?.session_id && row.ts && (best === undefined || row.ts > best.ts)) {
-        best = { sessionId: row.session_id, projectKey: row.project_key ?? '', ts: row.ts }
+        best = { sessionId: row.session_id, eventsPath, ts: row.ts }
       }
     } catch {
       // 单桶失败不影响其他桶
     }
   }
-  return best === undefined ? undefined : { sessionId: best.sessionId, projectKey: best.projectKey }
+  return best === undefined ? undefined : { sessionId: best.sessionId, eventsPath: best.eventsPath }
 }
 
 // 最近一次 pre-step 见到的会话 id + 项目键：命令上下文拿不到 agent.session 时兜底（2026-11-13 实测）
@@ -546,13 +546,29 @@ function registerThreadCommands(
   })
 
   reg('thread-panel', '只读状态面板：目标 / 决策链（含取代关系）/ 未决 / 交接 / 最近事件', '', (inv) => {
-    // 解析顺序：命令上下文 → 本进程 pre-step 记录 → 磁盘上最近活跃会话。
-    // 项目键决定事件桶，必须与会话同源，否则落到空桶（2026-11-13 三轮实测）。
-    const disk = sessionIdOf(inv) === '' && lastActiveProjectKey === '' ? latestSessionOnDisk() : undefined
-    const sid = sessionIdOf(inv) || lastActiveSessionId || disk?.sessionId || ''
-    const projectKey = lastActiveProjectKey || disk?.projectKey || ''
-    const s = projectKey ? deps.storeForProjectKey(projectKey) : deps.storeFor(sid)
-    return renderPanel(s, { sessionId: sid })
+    // 解析顺序：命令上下文 sid → 本进程 pre-step 记录 → 磁盘上最近活跃会话。
+    // 磁盘命中时直接打开扫到的 events.db，不再按项目键反解（旧事件行 project_key 可能为空，
+    // 反解会退回 fallback 空桶——2026-11-13 四轮实测）。
+    const directSid = sessionIdOf(inv)
+    if (directSid !== '') {
+      const projectKey = lastActiveProjectKey
+      const s = projectKey ? deps.storeForProjectKey(projectKey) : deps.storeFor(directSid)
+      return renderPanel(s, { sessionId: directSid })
+    }
+    if (lastActiveSessionId !== '' && lastActiveProjectKey !== '') {
+      return renderPanel(deps.storeForProjectKey(lastActiveProjectKey), { sessionId: lastActiveSessionId })
+    }
+    const disk = latestSessionOnDisk()
+    if (disk !== undefined) {
+      const structuredPath = join(threadRoot(), 'structured.db')
+      const s = new ThreadStore({ eventsPath: disk.eventsPath, structuredPath, projectKey: '' })
+      try {
+        return renderPanel(s, { sessionId: disk.sessionId })
+      } finally {
+        s.close()
+      }
+    }
+    return renderPanel(deps.storeFor(''), { sessionId: lastActiveSessionId })
   })
 
   reg('thread-handoff', '收尾生成一条交接（可选目标角色/会话；无参按 project 寻址）', '[target]', (inv) => {
