@@ -19,6 +19,9 @@ import {
   matchToolFeedback,
   parseBrief,
   parseToolArgs,
+  listOpenQuestions,
+  recordOpenQuestion,
+  settleOpenQuestion,
   proposeHandoff,
   recordInjection,
   renderPanel,
@@ -1404,6 +1407,21 @@ export function apply(ctx: Context, config: Config) {
             body: `${event.data.name} 调用参数：${String(argumentsRaw).slice(0, 2000)}`,
             meta: buildToolCallMeta(event.data.name, event.data.callId, argumentsRaw),
           }, { projectKey, origin: `dsh://tool#${event.data.callId}` }, busyRetries, busyRetryDelayMs)
+          // 阻塞性问题通道（P0-3）：ask_user_question 进收件箱（q#），超时后不许静默变成模型答案。
+          // 折同一批 tool/call 事件，不解析自然语言文本。
+          if (event.data.name === 'ask_user_question') {
+            try {
+              const parsed = parseToolArgs(event.data.arguments) as { questions?: unknown } | undefined
+              recordOpenQuestion(s, {
+                projectKey,
+                sessionId,
+                callId: String(event.data.callId),
+                questions: parsed?.questions ?? [],
+              })
+            } catch (err) {
+              console.error(`thread dsh: open question capture failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
           // 决策溯源锚（2026-10-07）：记住本会话最近一次 record_decision 调用事件，供确认门/命令通道落库时带锚
           if (event.data.name === 'record_decision') {
             decisionCallEvents.set(sessionId, appended.id)
@@ -1438,6 +1456,13 @@ export function apply(ctx: Context, config: Config) {
             body: body.slice(0, 2000),
             meta: { call_id: callId },
           }, { projectKey, origin: `dsh://toolresult#${callId}` }, busyRetries, busyRetryDelayMs)
+          // 问题得到回答 → 出队（settled）。只处理仍在 open 的同一 call_id。
+          try {
+            const pending = listOpenQuestions(s, { projectKey, status: 'open', limit: 50 }).find((q) => q.call_id === callId)
+            if (pending) settleOpenQuestion(s, pending.id, 'settled', { answer: body.slice(0, 500) })
+          } catch (err) {
+            console.error(`thread dsh: open question settle failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
           break
         }
         default:
